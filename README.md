@@ -94,10 +94,10 @@ See [ATTRIBUTION.md](ATTRIBUTION.md).
 ## License
 This project is released under the MIT License.
 
-
 ## Streamlit Dashboard
 Run the interactive dashboard:
 ```bash
 streamlit run app.py
 ```
 The app includes: simulator, SHAP explanations, metrics, dataset exploration, and model comparison views.
+
