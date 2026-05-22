@@ -1,0 +1,27 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Local Streamlit/dev artifacts
+.streamlit/secrets.toml
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Local outputs (keep folders, ignore generated contents)
+figures/*
+results/*
+artifacts/*
+!figures/.gitkeep
+!results/.gitkeep
+!artifacts/.gitkeep
+
+# Local dataset (do not version large raw data)
+data/*
+!data/.gitkeep
