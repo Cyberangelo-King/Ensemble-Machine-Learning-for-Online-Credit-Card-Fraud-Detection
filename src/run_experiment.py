@@ -57,8 +57,10 @@ TARGET_RESULTS = {
 
 @dataclass
 class ExperimentArtifacts:
+    """Container for trained model and metric outputs."""
+
     metrics: dict
-    model
+    model: object
 
 
 def set_seed(seed: int = RANDOM_STATE) -> None:
