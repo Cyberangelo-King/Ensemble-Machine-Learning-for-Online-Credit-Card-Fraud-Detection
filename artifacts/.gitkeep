@@ -1,0 +1,3 @@
+# Placeholder for artifacts directory
+# Trained stacking_model.joblib will be generated here after running:
+# python src/run_experiment.py --data-path data/creditcard.csv

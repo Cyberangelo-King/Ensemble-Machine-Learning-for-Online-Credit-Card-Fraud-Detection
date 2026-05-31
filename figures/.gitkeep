@@ -1,0 +1,3 @@
+# Placeholder for figures directory
+# PNG exports will be generated here after running:
+# python src/run_experiment.py --data-path data/creditcard.csv
