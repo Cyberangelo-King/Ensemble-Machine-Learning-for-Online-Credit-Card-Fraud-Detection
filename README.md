@@ -49,11 +49,11 @@ Dataset: **Credit Card Fraud Detection** (284,807 European card transactions).
 
 ## Quickstart
 ```bash
-# Use Python 3.10+; requirements.txt lists pip packages only.
+# Use Python 3.10+; requirements.txt selects compatible package pins.
 python3.10 -m venv .venv  # or: python -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python src/run_experiment.py --data-path data/creditcard.csv --output-dir results --fig-dir figures
 ```
 
