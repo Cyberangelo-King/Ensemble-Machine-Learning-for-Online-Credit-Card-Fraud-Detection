@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -59,9 +60,12 @@ TARGET_RESULTS = {
 @dataclass
 class ExperimentArtifacts:
     """Container for trained model and metric outputs."""
-
     metrics: dict
     model: object
+
+
+
+
 
 
 def set_seed(seed: int = RANDOM_STATE) -> None:
@@ -147,12 +151,12 @@ def build_models() -> tuple[dict, StackingClassifier]:
     return search_spaces, stacking
 
 
-def tune_model(name, model, params, X, y):
+def tune_model(name, model, params, X, y, n_iter=50):
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
     search = RandomizedSearchCV(
         estimator=model,
         param_distributions=params,
-        n_iter=50,
+        n_iter=n_iter,
         scoring="average_precision",
         n_jobs=-1,
         cv=cv,
@@ -190,12 +194,20 @@ def run(args):
 
     search_spaces, stacking = build_models()
     tuned = {}
+    n_iter = 2 if args.fast_run else 50
     for name, payload in search_spaces.items():
-        learner_name, best_model = tune_model(name, payload["model"], payload["params"], X_train_res, y_train_res)
+        learner_name, best_model = tune_model(
+            name, payload["model"], payload["params"], X_train_res, y_train_res, n_iter=n_iter
+        )
         tuned[learner_name] = best_model
 
     stacking.estimators = [(k, v) for k, v in tuned.items()]
     stacking.fit(X_train_res, y_train_res)
+
+    # Save model
+    artifacts_dir = Path("artifacts")
+    artifacts_dir.mkdir(exist_ok=True)
+    joblib.dump(stacking, artifacts_dir / "stacking_model.joblib")
 
     y_proba = stacking.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
@@ -278,4 +290,5 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", default="data/creditcard.csv")
     parser.add_argument("--output-dir", default="results")
     parser.add_argument("--fig-dir", default="figures")
+    parser.add_argument("--fast-run", action="store_true", help="Run with fewer iterations for testing")
     run(parser.parse_args())
