@@ -45,5 +45,4 @@ env/
 .ipynb_checkpoints
 
 # Streamlit
-.streamlit/
 .streamlit/secrets.toml

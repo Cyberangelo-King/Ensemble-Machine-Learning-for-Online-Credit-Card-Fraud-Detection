@@ -49,6 +49,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 RANDOM_STATE = 42
+FEATURE_COLUMNS = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 TARGET_RESULTS = {
     "auprc": 0.903,
     "f1": 0.881,
@@ -61,6 +62,9 @@ class ExperimentArtifacts:
     """Container for trained model and metric outputs."""
     metrics: dict
     model: object
+
+
+
 
 
 
@@ -81,9 +85,10 @@ def load_data(data_path: Path) -> pd.DataFrame:
             f"Dataset not found at {data_path}. Follow README dataset instructions."
         )
     df = pd.read_csv(data_path)
-    expected = {"Class", "Amount", "Time"}
-    if not expected.issubset(df.columns):
-        raise ValueError("Dataset schema mismatch: required columns missing.")
+    expected = {"Class", *FEATURE_COLUMNS}
+    missing = expected - set(df.columns)
+    if missing:
+        raise ValueError(f"Dataset schema mismatch: missing columns {sorted(missing)}.")
     return df
 
 
@@ -177,7 +182,7 @@ def run(args):
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_data(Path(args.data_path))
-    X = df.drop(columns=["Class"])
+    X = df[FEATURE_COLUMNS]
     y = df["Class"]
 
     X_train, X_test, y_train, y_test = train_test_split(

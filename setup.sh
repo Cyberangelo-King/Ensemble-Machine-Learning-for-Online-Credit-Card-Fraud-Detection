@@ -1,40 +1,70 @@
-#!/bin/bash
-# Quick setup script to generate demo model and launch Streamlit
+#!/usr/bin/env bash
+# One-command setup for the Streamlit fraud detection dashboard demo.
+set -euo pipefail
 
-echo "🚀 Fraud Detection Dashboard - Quick Setup"
-echo "=========================================="
+APP_PORT="${APP_PORT:-8501}"
+VENV_DIR="${VENV_DIR:-.venv}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 
-# Check Python version
-python_version=$(python3 --version 2>&1 | awk '{print $2}')
-echo "✓ Python version: $python_version"
+printf '\n🚀 Fraud Detection Dashboard - One-command setup\n'
+printf '================================================\n\n'
 
-# Create virtual environment if it doesn't exist
-if [ ! -d ".venv" ]; then
-    echo "📦 Creating virtual environment..."
-    python3.10 -m venv .venv
-fi
+find_python() {
+    if [[ -n "$PYTHON_BIN" ]]; then
+        command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
+            echo "❌ PYTHON_BIN is set to '$PYTHON_BIN' but it was not found."
+            exit 1
+        }
+        echo "$PYTHON_BIN"
+        return
+    fi
 
-# Activate virtual environment
-echo "🔌 Activating virtual environment..."
-source .venv/bin/activate
+    for candidate in python3.12 python3.11 python3.10 python3; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            if "$candidate" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 12)))
+PY
+            then
+                echo "$candidate"
+                return
+            fi
+        fi
+    done
 
-# Install dependencies
-echo "📥 Installing dependencies..."
-pip install -q --upgrade pip
-pip install -q -r requirements.txt
-
-# Create demo model and data
-echo "🤖 Creating demo stacking model..."
-python scripts/create_demo_model.py
-
-# Check if model was created successfully
-if [ -f "artifacts/stacking_model.joblib" ] && [ -f "data/creditcard.csv" ]; then
-    echo ""
-    echo "✅ Setup complete!"
-    echo ""
-    echo "📊 Starting Streamlit dashboard..."
-    streamlit run app.py
-else
-    echo "❌ Error: Model or data files not created"
+    echo "❌ Could not find Python 3.10, 3.11, or 3.12. Install one of those versions and rerun this script."
     exit 1
+}
+
+PYTHON_CMD="$(find_python)"
+echo "✓ Using Python: $($PYTHON_CMD --version)"
+
+if [[ ! -d "$VENV_DIR" ]]; then
+    echo "📦 Creating virtual environment in $VENV_DIR..."
+    "$PYTHON_CMD" -m venv "$VENV_DIR"
+else
+    echo "✓ Reusing existing virtual environment: $VENV_DIR"
 fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+if [[ ! -f artifacts/stacking_model.joblib || ! -f data/creditcard.csv ]]; then
+    echo "🤖 Creating demo model and sample data..."
+    python scripts/create_demo_model.py
+else
+    echo "✓ Demo/model artifacts already exist."
+fi
+
+cat <<EOF
+
+✅ Setup complete.
+
+Starting Streamlit at: http://localhost:${APP_PORT}
+Press Ctrl+C to stop the dashboard.
+EOF
+
+streamlit run app.py --server.port "$APP_PORT"
