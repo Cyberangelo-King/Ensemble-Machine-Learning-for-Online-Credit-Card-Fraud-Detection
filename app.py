@@ -26,7 +26,7 @@ TARGET_METRICS = {"AUPRC": 0.903, "F1": 0.881, "MCC": 0.884}
 MODEL_PATH = Path("artifacts/stacking_model.joblib")
 DATA_PATH = Path("data/creditcard.csv")
 RISK_COLORS = {"Low": "#2ca02c", "Medium": "#ffbf00", "High": "#d62728"}
-FEATURES = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time"]
+FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 
 SAMPLES = {
     "Legitimate Example": {f: 0.0 for f in FEATURES} | {"Amount": 12.3, "Time": 10000},
