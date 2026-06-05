@@ -7,12 +7,11 @@ services:
     startCommand: uvicorn dashboard.backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ALLOWED_ORIGINS
-        value: "*" # Set this to your frontend URL later for better security
+        value: "*"
 
   # Frontend Service (React)
-  - type: web
+  - type: static
     name: fraud-dashboard
-    env: node
     buildCommand: cd dashboard/frontend && npm install && npm run build
     staticPublishPath: dashboard/frontend/dist
     envVars:
