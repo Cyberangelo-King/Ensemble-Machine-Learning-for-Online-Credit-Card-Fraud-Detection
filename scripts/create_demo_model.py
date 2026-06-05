@@ -29,14 +29,15 @@ from xgboost import XGBClassifier
 warnings.filterwarnings("ignore")
 
 RANDOM_STATE = 42
+FEATURE_COLUMNS = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 np.random.seed(RANDOM_STATE)
 
 def create_synthetic_dataset(n_samples: int = 1000) -> pd.DataFrame:
     """Generate synthetic credit card fraud dataset."""
     print(f"Creating synthetic dataset ({n_samples} samples)...")
     
-    # 99.8% legitimate, 0.2% fraud (like real data)
-    n_fraud = max(1, int(n_samples * 0.002))
+    # Keep the demo imbalanced while ensuring enough fraud rows for CV.
+    n_fraud = max(6, int(n_samples * 0.01))
     n_legit = n_samples - n_fraud
     
     # Features V1-V28 (PCA components)
@@ -55,6 +56,7 @@ def create_synthetic_dataset(n_samples: int = 1000) -> pd.DataFrame:
     df["Time"] = time_vals
     df["Amount"] = amount_vals
     df["Class"] = y
+    df = df[[*FEATURE_COLUMNS, "Class"]]
     
     return df.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
 
@@ -80,12 +82,14 @@ def train_stacking_model(X: pd.DataFrame, y: pd.Series):
     # Meta learner
     meta = LogisticRegression(max_iter=100, solver="liblinear", random_state=RANDOM_STATE)
     
+    n_splits = min(3, int(y.value_counts().min()))
+
     # Stacking classifier
     stacking = StackingClassifier(
         estimators=[("lr", lr), ("rf", rf), ("xgb", xgb)],
         final_estimator=meta,
         stack_method="predict_proba",
-        cv=3,
+        cv=n_splits,
         n_jobs=-1
     )
     
@@ -110,7 +114,7 @@ def main():
     print(f"  Class distribution: {df['Class'].value_counts().to_dict()}")
     
     # Train model
-    X = df.drop(columns=["Class"])
+    X = df[FEATURE_COLUMNS]
     y = df["Class"]
     model = train_stacking_model(X, y)
     

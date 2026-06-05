@@ -22,43 +22,51 @@ This document explains how to deploy the fraud detection dashboard to production
 - GitHub account with this repository
 - Streamlit account (free tier available)
 
+### Best Option for a Sample Presentation
+
+Use the dashboard's built-in demo mode. Streamlit Cloud does **not** run `setup.sh`, and `data/creditcard.csv` plus `artifacts/stacking_model.joblib` are intentionally ignored by Git. The current `app.py` handles missing files by using a synthetic demo dataset and deterministic demo model, so no Kaggle download or committed model artifact is required for a presentation.
+
+If Streamlit Cloud shows `Startup error: Model file missing: artifacts/stacking_model.joblib`, the deployed app is running older code that still required a committed model file. Push the latest branch that includes demo mode, confirm Streamlit Cloud is deploying that branch with `app.py` as the main file, then reboot or redeploy the app. The repository includes `runtime.txt` to pin Streamlit Cloud to Python 3.12 for stable dependency installation.
+
 ### Deployment Steps
 
-1. **Push Code to GitHub**
+1. **Push the latest demo-mode code to GitHub**
    ```bash
-   git add .
-   git commit -m "Prepare for Streamlit Cloud deployment"
    git push origin main
    ```
 
-2. **Pre-train Model Locally**
-   ```bash
-   python src/run_experiment.py --data-path data/creditcard.csv
-   ```
-   
-   Then commit the trained model:
-   ```bash
-   git add artifacts/stacking_model.joblib
-   git commit -m "Add trained stacking model"
-   git push origin main
-   ```
-   
-   ⚠️ **Note:** The model is ~15 MB. Streamlit Cloud has storage limits; consider using external storage for larger models.
-
-3. **Go to Streamlit Cloud**
+2. **Create or redeploy the Streamlit Cloud app**
    - Visit: https://streamlit.io/cloud
-   - Click "New app"
-   - Select this GitHub repository
+   - Click "New app" or open your existing app settings
+   - Select this GitHub repository and the branch containing the latest `app.py`
    - Set main file path: `app.py`
-   - Click "Deploy"
+   - Click "Deploy"; for an existing app, click "Reboot" or "Redeploy" after pushing
 
-4. **Secrets Management**
-   - If using API keys: add to Streamlit Cloud Secrets
-   - Format: `.streamlit/secrets.toml`
-   ```toml
-   [api]
-   kaggle_api_key = "your-key-here"
-   ```
+3. **Verify demo mode**
+   - The app should load without `artifacts/stacking_model.joblib`
+   - A banner should say demo mode is active
+   - The Simulator, Metrics, Dataset, and Model Comparison pages should work for the presentation
+
+### Optional Production Model Deployment
+
+For production-quality model predictions, train locally on the real Kaggle CSV and upload the resulting model through a storage strategy that fits your deployment. The repository ignores these large generated files by default, so `setup.sh` artifacts are not automatically available on Streamlit Cloud.
+
+```bash
+python src/run_experiment.py --data-path data/creditcard.csv
+```
+
+Options after training:
+- keep using demo mode for presentations,
+- force-add a small demo artifact only if you explicitly want it in Git, or
+- store larger production artifacts externally, such as S3, GCS, Azure Blob Storage, or a model registry.
+
+### Secrets Management
+- If using API keys: add to Streamlit Cloud Secrets
+- Format: `.streamlit/secrets.toml`
+```toml
+[api]
+kaggle_api_key = "your-key-here"
+```
 
 ---
 
@@ -113,8 +121,9 @@ Run with: `docker-compose up`
 ## Production Considerations
 
 ### 1. Model Storage
-- **Local (< 50 MB):** Commit to repo ✓
-- **Large models (> 50 MB):** Use external storage
+- **Sample presentation:** use built-in demo mode; do not commit `artifacts/stacking_model.joblib`.
+- **Small intentional artifact (< 50 MB):** force-add only if you explicitly want the model in Git for a production-like demo.
+- **Large or production models:** use external storage.
   - AWS S3
   - Google Cloud Storage
   - Azure Blob Storage
@@ -170,13 +179,7 @@ logger.info(f"Prediction made: proba={proba:.3f}, latency={dt:.2f}ms")
 ```
 
 ### 5. Error Handling
-```python
-try:
-    model = load_model(MODEL_PATH)
-except FileNotFoundError:
-    st.error("Model not found. Please train the model first.")
-    st.stop()
-```
+The dashboard should not stop just because demo artifacts are absent. Keep missing-model handling on the demo fallback path used by `app.py`: load the trained model when it exists, otherwise use the deterministic demo model and show the demo-mode banner.
 
 ---
 
@@ -198,9 +201,11 @@ except FileNotFoundError:
 - Verify all dependencies in `requirements.txt`
 - Test locally first: `streamlit run app.py`
 
-### Model file not found
-- Ensure `artifacts/stacking_model.joblib` is committed
-- Or download dataset and train model on deployment platform
+### `Startup error: Model file missing: artifacts/stacking_model.joblib`
+- This is the old pre-demo-mode startup behavior. The latest `app.py` falls back to demo mode instead of stopping.
+- Push the latest code to GitHub, then reboot or redeploy the Streamlit Cloud app.
+- Confirm Streamlit Cloud is using the intended branch and `app.py` as the main file path.
+- For a sample presentation, do not commit the ignored `artifacts/stacking_model.joblib`; let demo mode run.
 
 ### Slow SHAP computations
 - Reduce sample size in `app.py` line 120

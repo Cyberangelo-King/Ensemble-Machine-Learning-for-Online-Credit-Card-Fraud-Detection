@@ -48,8 +48,20 @@ Dataset: **Credit Card Fraud Detection** (284,807 European card transactions).
 3. Place `creditcard.csv` into `data/`.
 
 ## Quickstart
+
+### Dashboard demo for presentations
+Run one command from the repository root:
 ```bash
-# Use Python 3.10+; requirements.txt selects compatible package pins.
+./setup.sh
+```
+This creates a virtual environment, installs dependencies, generates demo data/model artifacts if needed, and launches Streamlit at `http://localhost:8501`.
+
+### Streamlit Cloud sample presentation
+Deploy the latest branch on Streamlit Cloud with `app.py` as the main file. You do not need to upload `data/creditcard.csv` or `artifacts/stacking_model.joblib` for a sample presentation because the app will use demo mode when those files are absent. If Cloud shows `Startup error: Model file missing: artifacts/stacking_model.joblib`, redeploy the latest branch because the app is running old code.
+
+### Full research reproduction
+```bash
+# Use Python 3.10-3.12; requirements.txt selects compatible package pins.
 python3.10 -m venv .venv  # or: python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -97,9 +109,13 @@ See [ATTRIBUTION.md](ATTRIBUTION.md).
 This project is released under the MIT License.
 
 ## Streamlit Dashboard
-Run the interactive dashboard:
+Run the interactive dashboard directly after dependencies are installed:
 ```bash
 streamlit run app.py
 ```
-The app includes: simulator, SHAP explanations, metrics, dataset exploration, and model comparison views.
+Or use the one-command presentation launcher:
+```bash
+./setup.sh
+```
+The app includes: simulator, SHAP explanations, metrics, dataset exploration, and model comparison views. If the Kaggle CSV or trained artifact are not present yet, the app starts in demo mode with synthetic data and a deterministic heuristic model so deployment smoke tests still work. Train on the real dataset to enable production model predictions and SHAP explanations.
 
