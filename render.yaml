@@ -1,28 +1,38 @@
 services:
-  # Backend Service (FastAPI)
+  # ── Python / FastAPI backend ──────────────────────────────────────────────
   - type: web
     name: fraud-api
     env: python
-    buildCommand: pip install -r requirements.txt && python scripts/generate_synthetic_data.py && python src/run_experiment.py
+    region: oregon
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt &&
+      python scripts/generate_synthetic_data.py &&
+      python scripts/create_demo_model.py
     startCommand: uvicorn dashboard.backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
       - key: ALLOWED_ORIGINS
-        value: "*" # Set this to your frontend URL later for better security
+        # TODO: Replace with your actual frontend URL before going to production
+        value: "*"
+    healthCheckPath: /health
 
-  # Frontend Service (React)
+  # ── Node / React frontend ─────────────────────────────────────────────────
   - type: web
     name: fraud-dashboard
     env: node
+    region: oregon
+    plan: free
     buildCommand: cd dashboard/frontend && npm install && npm run build
-    staticPublishPath: dashboard/frontend/dist
+    startCommand: cd dashboard/frontend && npx serve -s dist -l $PORT
     envVars:
+      - key: NODE_VERSION
+        value: "18.17.0"
       - key: VITE_API_URL
-        fromService:
-          name: fraud-api
-          type: web
-          property: host
+        # Must include protocol — fromService resolves the hostname only, so we
+        # prepend https:// explicitly.
+        value: https://fraud-api.onrender.com
       - key: VITE_WS_URL
-        fromService:
-          name: fraud-api
-          type: web
-          property: host
+        # WebSocket URL must use the wss:// (secure WebSocket) scheme.
+        value: wss://fraud-api.onrender.com

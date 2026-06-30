@@ -1,48 +1,76 @@
-# Data and artifacts (large files - excluded from version control)
-data/creditcard.csv
-artifacts/stacking_model.joblib
-results/
-figures/
-notebooks/.ipynb_checkpoints/
+# =============================================================================
+# .gitignore — Ensemble ML Fraud Detection
+# =============================================================================
 
-# Python
+# ── Dataset (too large / proprietary — download from Kaggle) ─────────────────
+data/creditcard.csv
+data/*.csv
+
+# ── Generated artefacts ───────────────────────────────────────────────────────
+artifacts/*.pkl
+artifacts/*.joblib
+artifacts/*.model
+results/metrics.json
+figures/*.png
+figures/*.pdf
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
+# ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
 venv/
 ENV/
 env/
+.env
 
-# IDE
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+dashboard/frontend/dist/
+dashboard/frontend/.env
+dashboard/frontend/.env.*
+frontend.log
+
+# ── Build artefacts ───────────────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# Jupyter
-.ipynb_checkpoints
-
-# Streamlit
-.streamlit/secrets.toml
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+frontend.log

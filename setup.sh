@@ -1,70 +1,103 @@
 #!/usr/bin/env bash
-# One-command setup for the Streamlit fraud detection dashboard demo.
+# =============================================================================
+# setup.sh -- One-command setup for the Fraud Detection Streamlit demo
+# =============================================================================
 set -euo pipefail
 
-APP_PORT="${APP_PORT:-8501}"
-VENV_DIR="${VENV_DIR:-.venv}"
-PYTHON_BIN="${PYTHON_BIN:-}"
+# ── Colour helpers (ASCII-safe) ───────────────────────────────────────────────
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'   # No Colour
 
-printf '\n🚀 Fraud Detection Dashboard - One-command setup\n'
-printf '================================================\n\n'
+info()    { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-find_python() {
-    if [[ -n "$PYTHON_BIN" ]]; then
-        command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
-            echo "❌ PYTHON_BIN is set to '$PYTHON_BIN' but it was not found."
-            exit 1
-        }
-        echo "$PYTHON_BIN"
-        return
-    fi
+# ── Banner ────────────────────────────────────────────────────────────────────
+echo ""
+echo "======================================================"
+echo "  Ensemble ML - Credit Card Fraud Detection"
+echo "  Setup Script"
+echo "======================================================"
+echo ""
 
-    for candidate in python3.12 python3.11 python3.10 python3; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            if "$candidate" - <<'PY' >/dev/null 2>&1
-import sys
-raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 12)))
-PY
-            then
-                echo "$candidate"
-                return
-            fi
+# ── 1. Python version check ───────────────────────────────────────────────────
+info "Checking Python version..."
+PYTHON_CMD=""
+for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then
+        VER=$("$cmd" --version 2>&1 | awk '{print $2}')
+        MAJOR=$(echo "$VER" | cut -d. -f1)
+        MINOR=$(echo "$VER" | cut -d. -f2)
+        if [ "$MAJOR" -ge 3 ] && [ "$MINOR" -ge 9 ]; then
+            PYTHON_CMD="$cmd"
+            info "Found $cmd $VER -- OK"
+            break
+        else
+            warn "Found $cmd $VER but Python >= 3.9 is required."
         fi
-    done
+    fi
+done
 
-    echo "❌ Could not find Python 3.10, 3.11, or 3.12. Install one of those versions and rerun this script."
+if [ -z "$PYTHON_CMD" ]; then
+    error "Python 3.9 or higher not found. Please install Python and re-run."
     exit 1
-}
+fi
 
-PYTHON_CMD="$(find_python)"
-echo "✓ Using Python: $($PYTHON_CMD --version)"
-
-if [[ ! -d "$VENV_DIR" ]]; then
-    echo "📦 Creating virtual environment in $VENV_DIR..."
+# ── 2. Create virtual environment ─────────────────────────────────────────────
+VENV_DIR=".venv"
+if [ ! -d "$VENV_DIR" ]; then
+    info "Creating virtual environment at $VENV_DIR ..."
     "$PYTHON_CMD" -m venv "$VENV_DIR"
 else
-    echo "✓ Reusing existing virtual environment: $VENV_DIR"
+    info "Virtual environment already exists at $VENV_DIR -- skipping creation."
 fi
 
+# Activate
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
+info "Virtual environment activated."
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+# ── 3. Upgrade pip ────────────────────────────────────────────────────────────
+info "Upgrading pip..."
+pip install --quiet --upgrade pip
 
-if [[ ! -f artifacts/stacking_model.joblib || ! -f data/creditcard.csv ]]; then
-    echo "🤖 Creating demo model and sample data..."
-    python scripts/create_demo_model.py
+# ── 4. Install dependencies ───────────────────────────────────────────────────
+info "Installing Python dependencies from requirements.txt..."
+if [ ! -f "requirements.txt" ]; then
+    error "requirements.txt not found. Are you running this from the repo root?"
+    exit 1
+fi
+pip install --quiet -r requirements.txt
+info "Dependencies installed."
+
+# ── 5. Generate synthetic data (if not already present) ───────────────────────
+DATA_FILE="data/creditcard.csv"
+if [ ! -f "$DATA_FILE" ]; then
+    info "Generating synthetic dataset..."
+    "$PYTHON_CMD" scripts/generate_synthetic_data.py
+    info "Synthetic dataset written to $DATA_FILE."
 else
-    echo "✓ Demo/model artifacts already exist."
+    info "Dataset already exists at $DATA_FILE -- skipping generation."
 fi
 
-cat <<EOF
+# ── 6. Create demo model (if not already present) ─────────────────────────────
+MODEL_FILE="artifacts/fraud_model.pkl"
+if [ ! -f "$MODEL_FILE" ]; then
+    info "Training demo model..."
+    "$PYTHON_CMD" scripts/create_demo_model.py
+    info "Demo model written to $MODEL_FILE."
+else
+    info "Demo model already exists at $MODEL_FILE -- skipping training."
+fi
 
-✅ Setup complete.
-
-Starting Streamlit at: http://localhost:${APP_PORT}
-Press Ctrl+C to stop the dashboard.
-EOF
-
-streamlit run app.py --server.port "$APP_PORT"
+# ── 7. Launch Streamlit app ───────────────────────────────────────────────────
+info "Launching Streamlit dashboard..."
+echo ""
+echo "------------------------------------------------------"
+echo "  Dashboard URL: http://localhost:8501"
+echo "  Press Ctrl+C to stop."
+echo "------------------------------------------------------"
+echo ""
+streamlit run app.py
