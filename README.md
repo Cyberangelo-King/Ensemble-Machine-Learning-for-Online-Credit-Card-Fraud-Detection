@@ -6,6 +6,8 @@
 [![AUPRC](https://img.shields.io/badge/AUPRC-0.903-orange)](RESULTS.md)
 [![F1](https://img.shields.io/badge/F1-0.881-red)](RESULTS.md)
 
+> **Release note:** Headline metrics shown here are the recorded benchmark snapshot. The hardened release now selects thresholds without using the test set; rerun the research experiment to regenerate current threshold-specific metrics.
+
 A **research-grade, production-oriented stacking ensemble** for real-time credit card fraud detection, achieving AUPRC 0.903 and MCC 0.884 on the Kaggle Credit Card Fraud dataset. The system combines Logistic Regression, Random Forest, and XGBoost base learners with a Logistic Regression meta-learner, using leakage-free SMOTE-inside-CV oversampling and full statistical validation across 5 stability runs.
 
 ---
