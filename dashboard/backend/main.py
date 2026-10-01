@@ -16,6 +16,7 @@ import logging
 import os
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -23,7 +24,7 @@ import numpy as np
 import pandas as pd
 import shap
 import joblib
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -75,16 +76,7 @@ async def lifespan(app: FastAPI):
             MODEL_PATH,
         )
 
-    # --- Scaler ---
-    if os.path.exists(SCALER_PATH):
-        try:
-            state.scaler = joblib.load(SCALER_PATH)
-            logger.info("Scaler loaded from %s", SCALER_PATH)
-        except Exception as exc:
-            logger.warning("Failed to load scaler from %s: %s", SCALER_PATH, exc)
-            state.scaler = None
-    else:
-        logger.warning("Scaler file not found at %s.", SCALER_PATH)
+    state.scaler = state.model.get("scaler") if isinstance(state.model, dict) else None
 
     # --- Data ---
     if os.path.exists(DATA_PATH):
@@ -128,7 +120,10 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-ALLOWED_ORIGINS: List[str] = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_ORIGINS: List[str] = [x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").split(",") if x.strip()]
+API_KEY = os.environ.get("FRAUD_API_KEY", "").strip()
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "120"))
+_rate_buckets: Dict[str, List[float]] = {}
 
 app = FastAPI(
     title="Fraud Detection API",
@@ -140,9 +135,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # ---------------------------------------------------------------------------
@@ -164,6 +159,24 @@ def _require_model() -> None:
                 "Run scripts/create_demo_model.py and restart the service."
             ),
         )
+
+
+def _require_api_key(provided_key: Optional[str]) -> None:
+    if API_KEY and provided_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
+def _check_rate_limit(request: Request) -> None:
+    now = time.monotonic()
+    key = request.client.host if request.client else "unknown"
+    bucket = [t for t in _rate_buckets.get(key, []) if now - t < 60]
+    if len(bucket) >= RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again later.")
+    bucket.append(now)
+    _rate_buckets[key] = bucket
+    if len(_rate_buckets) > 10000:
+        oldest = min(_rate_buckets, key=lambda k: _rate_buckets[k][-1])
+        _rate_buckets.pop(oldest, None)
 
 
 def _safe_expected_value(explainer: Any) -> float:
@@ -209,13 +222,16 @@ class TransactionFeatures(BaseModel):
 
 class PredictionResponse(BaseModel):
     fraud_probability: float
-    prediction: int  # 0 = legitimate, 1 = fraud
+    prediction: int
+    threshold: float
     model_loaded: bool
 
 
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
+    model_version: str
+    readiness: bool
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +244,19 @@ async def health_check() -> HealthResponse:
     Health check endpoint.  Always returns 200.
     Reports whether the model is currently loaded.
     """
-    return HealthResponse(status="ok", model_loaded=state.model_loaded)
+    version = "unknown"
+    if isinstance(state.model, dict):
+        version = str(state.model.get("model_version", "unknown"))
+    return HealthResponse(
+        status="ok" if state.model_loaded else "degraded",
+        model_loaded=state.model_loaded,
+        model_version=version,
+        readiness=state.model_loaded,
+    )
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["inference"])
-async def predict(transaction: TransactionFeatures) -> PredictionResponse:
+async def predict(transaction: TransactionFeatures, request: Request, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> PredictionResponse:
     """
     Predict the fraud probability for a single transaction.
 
@@ -241,10 +265,40 @@ async def predict(transaction: TransactionFeatures) -> PredictionResponse:
     ``feature_names_in_`` attribute when available.
     """
     _require_model()
+    _require_api_key(x_api_key)
+    _check_rate_limit(request)
 
     try:
-        # Build a DataFrame so column ordering is handled correctly
         feature_dict = transaction.features
+        required = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time"]
+        missing = [name for name in required if name not in feature_dict]
+        if missing:
+            raise HTTPException(status_code=422, detail={"missing_features": missing})
+        unknown = sorted(set(feature_dict) - set(required))
+        if unknown:
+            raise HTTPException(status_code=422, detail={"unknown_features": unknown})
+        if not all(np.isfinite(float(v)) for v in feature_dict.values()):
+            raise HTTPException(status_code=422, detail="All feature values must be finite numbers.")
+        if float(feature_dict["Amount"]) < 0:
+            raise HTTPException(status_code=422, detail="Amount must be non-negative.")
+
+        row = dict(feature_dict)
+        row["Amount_log"] = float(np.log1p(row["Amount"]))
+        row["Hour"] = float((row["Time"] % 86400) / 3600)
+        expected_cols = list(state.model.get("feature_names", []))
+        df_input = pd.DataFrame([{col: row[col] for col in expected_cols}], columns=expected_cols)
+        x_sc = state.model["scaler"].transform(df_input)
+        meta_x = np.column_stack([clf.predict_proba(x_sc)[:, 1] for clf in state.model["base_learners"]])
+        proba = float(state.model["meta_learner"].predict_proba(meta_x)[0, 1])
+        threshold = float(state.model.get("optimal_threshold", 0.5))
+        pred = int(proba >= threshold)
+
+        return PredictionResponse(
+            fraud_probability=proba,
+            prediction=pred,
+            threshold=threshold,
+            model_loaded=True,
+        )
         df_input = pd.DataFrame([feature_dict])
 
         # Align columns to model's expected order if possible
