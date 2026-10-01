@@ -248,7 +248,7 @@ async def health_check() -> HealthResponse:
     if isinstance(state.model, dict):
         version = str(state.model.get("model_version", "unknown"))
     return HealthResponse(
-        status="ok" if state.model_loaded else "degraded",
+        status="ok",
         model_loaded=state.model_loaded,
         model_version=version,
         readiness=state.model_loaded,
