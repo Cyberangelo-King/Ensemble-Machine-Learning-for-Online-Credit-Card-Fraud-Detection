@@ -14,8 +14,9 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.0"
       - key: ALLOWED_ORIGINS
-        # TODO: Replace with your actual frontend URL before going to production
-        value: "*"
+        value: "https://fraud-dashboard.onrender.com"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "120"
     healthCheckPath: /health
 
   # ── Node / React frontend ─────────────────────────────────────────────────
