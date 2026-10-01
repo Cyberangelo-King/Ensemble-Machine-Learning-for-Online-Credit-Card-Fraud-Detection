@@ -81,6 +81,7 @@ from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
     learning_curve,
+    cross_val_predict,
 )
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -731,9 +732,24 @@ def run_full_pipeline(
     # ── Inference ─────────────────────────────────────────────────────────
     y_prob_test = meta_lr.predict_proba(meta_X_test)[:, 1]
 
-    # ── Metrics at default threshold ──────────────────────────────────────
+    # ── Threshold selection on validation-only predictions ─────────────────
+    # The test set is never used to choose the operating threshold.
+    meta_cv = StratifiedKFold(n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"])
+    meta_val_prob = cross_val_predict(
+        LogisticRegression(
+            C=cfg["meta_lr_C"],
+            solver=cfg["meta_lr_solver"],
+            max_iter=cfg["meta_lr_max_iter"],
+            random_state=cfg["random_state"],
+        ),
+        meta_X_train,
+        y_train,
+        cv=meta_cv,
+        method="predict_proba",
+        n_jobs=cfg["n_jobs"],
+    )[:, 1]
+    opt_thresh = find_optimal_threshold(y_train, meta_val_prob)
     metrics_05 = compute_metrics(y_test, y_prob_test, threshold=0.5)
-    opt_thresh = find_optimal_threshold(y_test, y_prob_test)
     metrics_opt = compute_metrics(y_test, y_prob_test, threshold=opt_thresh)
 
     LOG.info("=" * 70)
@@ -771,6 +787,12 @@ def run_full_pipeline(
         "scaler": scaler_final,
         "feature_names": list(X.columns),
         "optimal_threshold": opt_thresh,
+        "model_version": "stacking-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ"),
+        "evaluation_protocol": {
+            "threshold_selected_on": "cross-validated training meta-features",
+            "test_set_used_for_threshold_selection": False,
+            "temporal_validation": False,
+        },
         "config": cfg,
     }
     model_path = output_dir / "stacking_model.pkl"
@@ -790,6 +812,15 @@ def run_full_pipeline(
         "threshold_0.5": metrics_05,
         "threshold_optimal": metrics_opt,
         "optimal_threshold_value": opt_thresh,
+        "threshold_selection": {
+            "method": "F1 maximization",
+            "selection_data": "cross-validated training meta-features",
+            "test_set_used": False,
+        },
+        "evaluation_limitations": {
+            "temporal_validation": "not performed",
+            "external_dataset_validation": "not performed",
+        },
     }
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w") as f:
