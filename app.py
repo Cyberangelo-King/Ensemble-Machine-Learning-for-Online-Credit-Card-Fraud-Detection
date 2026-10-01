@@ -924,8 +924,8 @@ elif page == "ℹ️ About":
        Random Forest, and XGBoost under a Logistic Regression meta-learner
     2. **Implement** SMOTE oversampling strictly within cross-validation folds to prevent 
        data leakage
-    3. **Achieve** state-of-the-art performance: AUPRC > 0.90, F1 > 0.88, MCC > 0.88
-    4. **Deploy** the system as a real-time, production-ready web application
+    3. **Achieve** benchmark performance: AUPRC > 0.90, F1 > 0.88, MCC > 0.88
+    4. **Deploy** the system as a real-time, production-oriented web application
     5. **Validate** results through statistical significance testing (5-run stability analysis)
     
     ### Technical Stack

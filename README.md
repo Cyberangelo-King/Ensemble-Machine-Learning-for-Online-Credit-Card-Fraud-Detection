@@ -6,7 +6,7 @@
 [![AUPRC](https://img.shields.io/badge/AUPRC-0.903-orange)](RESULTS.md)
 [![F1](https://img.shields.io/badge/F1-0.881-red)](RESULTS.md)
 
-A **research-grade, production-deployable stacking ensemble** for real-time credit card fraud detection, achieving AUPRC 0.903 and MCC 0.884 on the Kaggle Credit Card Fraud dataset. The system combines Logistic Regression, Random Forest, and XGBoost base learners with a Logistic Regression meta-learner, using leakage-free SMOTE-inside-CV oversampling and full statistical validation across 5 stability runs.
+A **research-grade, production-oriented stacking ensemble** for real-time credit card fraud detection, achieving AUPRC 0.903 and MCC 0.884 on the Kaggle Credit Card Fraud dataset. The system combines Logistic Regression, Random Forest, and XGBoost base learners with a Logistic Regression meta-learner, using leakage-free SMOTE-inside-CV oversampling and full statistical validation across 5 stability runs.
 
 ---
 
@@ -347,4 +347,4 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 ---
 
-*Final Year Project — [Your University Name] | Academic Year 2024–2025*
+*Final Year Project — Federal University of Technology, Akure | Academic Year 2025–2026*

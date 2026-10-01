@@ -82,7 +82,7 @@ Three base learners selected for diversity and complementarity:
 |---|---|
 | **Logistic Regression** | Provides well-calibrated probabilities, acts as a linear baseline within the ensemble, fast to tune |
 | **Random Forest** | High-variance learner with natural feature importance; immune to feature scaling; handles non-linear interactions |
-| **XGBoost** | State-of-the-art gradient boosting; best raw performance; early stopping prevents overfitting |
+| **XGBoost** | Strong gradient boosting baseline; early stopping is used to control overfitting |
 
 Meta-learner: Logistic Regression — a simple linear model is intentionally chosen to avoid overfitting on only 3 meta-features.
 
