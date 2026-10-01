@@ -17,6 +17,7 @@ import os
 import asyncio
 import json
 import time
+import hashlib
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -64,7 +65,14 @@ async def lifespan(app: FastAPI):
     # --- Model ---
     if os.path.exists(MODEL_PATH):
         try:
+            if MODEL_SHA256:
+                with open(MODEL_PATH, "rb") as model_file:
+                    digest = hashlib.sha256(model_file.read()).hexdigest()
+                if digest != MODEL_SHA256:
+                    raise RuntimeError("MODEL_SHA256 integrity check failed")
             state.model = joblib.load(MODEL_PATH)
+            if not isinstance(state.model, dict) or "base_learners" not in state.model or "meta_learner" not in state.model or "scaler" not in state.model:
+                raise RuntimeError("Invalid model bundle schema")
             logger.info("Model loaded from %s", MODEL_PATH)
         except Exception as exc:
             logger.warning("Failed to load model from %s: %s", MODEL_PATH, exc)
@@ -123,6 +131,7 @@ async def lifespan(app: FastAPI):
 ALLOWED_ORIGINS: List[str] = [x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").split(",") if x.strip()]
 API_KEY = os.environ.get("FRAUD_API_KEY", "").strip()
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "120"))
+MODEL_SHA256 = os.environ.get("MODEL_SHA256", "").strip().lower()
 _rate_buckets: Dict[str, List[float]] = {}
 
 app = FastAPI(
@@ -155,8 +164,7 @@ def _require_model() -> None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Model is not loaded. "
-                "Run scripts/create_demo_model.py and restart the service."
+                "Model is not loaded. Supply a verified trained model bundle before live use."
             ),
         )
 
