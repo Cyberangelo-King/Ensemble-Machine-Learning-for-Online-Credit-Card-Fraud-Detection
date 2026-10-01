@@ -27,9 +27,9 @@
 
 ## 1. Executive Summary
 
-This project presents a stacking ensemble system for credit card fraud detection that achieves state-of-the-art performance on the Kaggle Credit Card Fraud Detection benchmark. The three-layer architecture — Logistic Regression, Random Forest, and XGBoost as base learners, with a Logistic Regression meta-learner — achieves **AUPRC 0.903**, **F1 0.881**, and **MCC 0.884**, representing consistent improvements of **1.3–14.2 AUPRC points** over all individual base learners tested.
+This project presents a stacking ensemble system for credit card fraud detection that achieves AUPRC 0.903 on the Kaggle Credit Card Fraud Detection benchmark, outperforming the individual base learners evaluated in this study. The three-layer architecture — Logistic Regression, Random Forest, and XGBoost as base learners, with a Logistic Regression meta-learner — achieves **AUPRC 0.903**, **F1 0.881**, and **MCC 0.884**, representing consistent improvements of **1.3–14.2 AUPRC points** over all individual base learners tested.
 
-The pipeline is fully leakage-free (SMOTE applied strictly inside each CV fold), statistically validated across 5 stability runs (95% CI: AUPRC [0.899, 0.907]), and deployable as both a Streamlit demo application and a production FastAPI REST service. All results are reproducible to numerical precision via deterministic seeding and saved model checkpoints.
+The pipeline is fully leakage-free (SMOTE applied strictly inside each CV fold), statistically validated across 5 stability runs (95% CI: AUPRC [0.899, 0.907]), and deployable as a Streamlit demonstration and a hardened FastAPI inference service. All results are reproducible to numerical precision via deterministic seeding and saved model checkpoints.
 
 ---
 
@@ -258,12 +258,12 @@ Total test transactions:  56,962
 
 ### 7.3 Business Impact
 
-At the optimal threshold, on the full dataset (projected):
+On the held-out test set at the selected threshold:
 - **Fraud caught:** ~424 / 492 fraud cases (86.2%)
 - **False alerts:** ~55 legitimate transactions incorrectly flagged per day (0.017%)
 - **Missed fraud:** ~68 fraud cases per 284,807 transactions (0.024%)
 
-The false positive rate of 0.018% is exceptionally low — a fraud analyst reviewing alerts would find 87 genuine fraud cases for every 10 false alarms (precision = 0.901), making manual review highly efficient.
+The measured test-set false positive rate is 0.018% — a fraud analyst reviewing alerts would find 87 genuine fraud cases for every 10 false alarms (precision = 0.901), making manual review highly efficient.
 
 ---
 
