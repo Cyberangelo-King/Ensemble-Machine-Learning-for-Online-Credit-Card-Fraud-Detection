@@ -7,8 +7,7 @@ services:
     plan: free
     buildCommand: |
       pip install -r requirements.txt &&
-      python scripts/generate_synthetic_data.py &&
-      python scripts/create_demo_model.py
+      python scripts/fetch_model.py
     startCommand: uvicorn dashboard.backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
@@ -17,6 +16,10 @@ services:
         value: "https://fraud-dashboard.onrender.com"
       - key: RATE_LIMIT_PER_MINUTE
         value: "120"
+      - key: MODEL_URL
+        sync: false
+      - key: MODEL_SHA256
+        sync: false
     healthCheckPath: /health
 
   # ── Node / React frontend ─────────────────────────────────────────────────
