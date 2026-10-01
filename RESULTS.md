@@ -258,7 +258,7 @@ Total test transactions:  56,962
 
 ### 7.3 Business Impact
 
-On the held-out test set at the selected threshold:
+On the held-out test set in the historical v2.0 snapshot:
 - **Fraud caught:** ~424 / 492 fraud cases (86.2%)
 - **False alerts:** ~55 legitimate transactions incorrectly flagged per day (0.017%)
 - **Missed fraud:** ~68 fraud cases per 284,807 transactions (0.024%)
