@@ -423,53 +423,35 @@ async def explain(index: int) -> Dict[str, Any]:
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
-    """
-    WebSocket endpoint that streams live (synthetic) transaction predictions.
-
-    The client connects; the server sends one JSON message per second with a
-    randomly sampled transaction and its fraud probability.  The connection
-    stays open until the client disconnects.
-    """
+    """Stream dashboard transactions through the same bundle used by /predict."""
     await websocket.accept()
     logger.info("WebSocket client connected.")
-
     try:
         while True:
             if state.model is None or state.data is None:
-                await websocket.send_json(
-                    {"error": "Model or data not loaded", "model_loaded": False}
-                )
+                await websocket.send_json({"error": "Service is not ready", "model_loaded": False})
                 await asyncio.sleep(2)
                 continue
-
             try:
-                feature_cols = _get_feature_columns(state.data)
-                sample = state.data[feature_cols].sample(1, random_state=None)
-                proba = float(state.model.predict_proba(sample)[0, 1])
-                prediction = int(proba >= 0.5)
-                true_label = int(
-                    state.data.iloc[sample.index[0]]["Class"]
-                ) if "Class" in state.data.columns else None
-
+                sample = state.data.sample(1, random_state=None)
+                probabilities, predictions = _predict_raw(sample)
                 payload: Dict[str, Any] = {
                     "transaction_index": int(sample.index[0]),
-                    "fraud_probability": proba,
-                    "prediction": prediction,
+                    "fraud_probability": float(probabilities[0]),
+                    "prediction": int(predictions[0]),
                     "features": {
-                        col: float(sample[col].iloc[0]) for col in feature_cols[:5]
+                        col: float(sample[col].iloc[0])
+                        for col in [f"V{i}" for i in range(1, 6)]
                     },
                 }
-                if true_label is not None:
-                    payload["true_label"] = true_label
-
+                if "Class" in sample.columns:
+                    payload["true_label"] = int(sample["Class"].iloc[0])
                 await websocket.send_json(payload)
-            except Exception as exc:
-                logger.warning("Stream error: %s", exc)
-                await websocket.send_json({"error": str(exc)})
-
+            except Exception:
+                logger.exception("Stream error")
+                await websocket.send_json({"error": "Prediction failed"})
             await asyncio.sleep(1)
-
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected.")
-    except Exception as exc:
-        logger.exception("WebSocket stream crashed: %s", exc)
+    except Exception:
+        logger.exception("WebSocket stream crashed.")
