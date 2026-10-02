@@ -37,11 +37,15 @@ jobs:
       - name: Train demo model
         run: python scripts/create_demo_model.py
 
-      # ── 6. Smoke tests ──────────────────────────────────────────────────────
+      # ── 6. Configure integrity for the locally generated test artefact ─────
+      - name: Configure model integrity check
+        run: echo "MODEL_SHA256=$(sha256sum results/stacking_model.pkl | cut -d ' ' -f1)" >> "$GITHUB_ENV"
+
+      # ── 7. Smoke tests ──────────────────────────────────────────────────────
       - name: Run smoke tests
         run: python scripts/smoke_test_ci.py
 
-      # ── 7. pytest (unit + integration, no live server required) ─────────────
+      # ── 8. pytest (unit + integration, no live server required) ─────────────
       - name: Run pytest
         run: pytest scripts/test_backend.py -v --tb=short
 
