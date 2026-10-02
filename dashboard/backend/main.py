@@ -86,36 +86,33 @@ async def lifespan(app: FastAPI):
 
     state.scaler = state.model.get("scaler") if isinstance(state.model, dict) else None
 
-    # --- Data ---
+    # --- Dashboard data ---
     if os.path.exists(DATA_PATH):
         try:
             state.data = pd.read_csv(DATA_PATH)
             logger.info("Dataset loaded: %d rows from %s", len(state.data), DATA_PATH)
-        except Exception as exc:
-            logger.warning("Failed to load dataset from %s: %s", DATA_PATH, exc)
-            state.data = None
+        except Exception:
+            state.data = _generate_dashboard_data()
     else:
-        logger.warning(
-            "Dataset not found at %s. Explain endpoint will return 503.", DATA_PATH
-        )
+        state.data = _generate_dashboard_data()
+        logger.info("Research dataset absent; using synthetic dashboard data.")
 
-    # --- SHAP explainer (only if model is present) ---
-    if state.model is not None:
+    # Build explanations against the exact engineered feature space expected by the bundle.
+    if state.model is not None and state.data is not None:
         try:
-            # Use a small background dataset when data is available, else None
-            if state.data is not None:
-                feature_cols = _get_feature_columns(state.data)
-                background = state.data[feature_cols].sample(
-                    min(100, len(state.data)), random_state=42
-                )
-                state.explainer = shap.Explainer(state.model, background)
-            else:
-                state.explainer = shap.Explainer(state.model)
+            background = _prepare_raw_dataframe(state.data).sample(
+                min(50, len(state.data)), random_state=42
+            )
+            state.explainer = shap.Explainer(
+                lambda matrix: _predict_matrix(np.asarray(matrix)),
+                background.to_numpy(dtype=float),
+                feature_names=list(background.columns),
+                algorithm="permutation",
+            )
             logger.info("SHAP explainer initialised.")
         except Exception as exc:
             logger.warning("Could not initialise SHAP explainer: %s", exc)
             state.explainer = None
-
     state.model_loaded = state.model is not None
     logger.info("Startup complete. model_loaded=%s", state.model_loaded)
 
