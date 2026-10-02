@@ -295,7 +295,7 @@ class HealthResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health_check() -> HealthResponse:
     """
-    Health check endpoint.  Always returns 200.
+    Readiness health check.
     Reports whether the model is currently loaded.
     """
     version = "unknown"
@@ -361,31 +361,6 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
             fraud_probability=proba,
             prediction=pred,
             threshold=threshold,
-            model_loaded=True,
-        )
-        df_input = pd.DataFrame([feature_dict])
-
-        # Align columns to model's expected order if possible
-        if hasattr(state.model, "feature_names_in_"):
-            expected_cols = list(state.model.feature_names_in_)
-            # Fill any missing cols with 0
-            for col in expected_cols:
-                if col not in df_input.columns:
-                    df_input[col] = 0.0
-            df_input = df_input[expected_cols]
-
-        # Scale Amount/Time if scaler is available
-        if state.scaler is not None:
-            scale_cols = [c for c in ["Amount", "Time"] if c in df_input.columns]
-            if scale_cols:
-                df_input[scale_cols] = state.scaler.transform(df_input[scale_cols])
-
-        proba = state.model.predict_proba(df_input)[0, 1]
-        pred = int(proba >= 0.5)
-
-        return PredictionResponse(
-            fraud_probability=float(proba),
-            prediction=pred,
             model_loaded=True,
         )
     except HTTPException:
