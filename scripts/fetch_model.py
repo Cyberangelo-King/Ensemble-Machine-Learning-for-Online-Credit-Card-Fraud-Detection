@@ -11,8 +11,10 @@ MODEL_SHA256 = os.environ.get("MODEL_SHA256", "").strip().lower()
 OUTPUT = Path(os.environ.get("MODEL_OUTPUT", "results/stacking_model.pkl"))
 
 if not MODEL_URL:
-    print("MODEL_URL not configured; leaving model absent. Live inference will remain unavailable.")
-    raise SystemExit(0)
+    raise SystemExit("MODEL_URL is required for a production deployment.")
+
+if len(MODEL_SHA256) != 64:
+    raise SystemExit("MODEL_SHA256 must be a 64-character SHA-256 digest.")
 
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 print(f"Downloading trained model to {OUTPUT} ...")
@@ -23,10 +25,9 @@ with urlopen(MODEL_URL, timeout=60) as response, OUTPUT.open("wb") as target:
             break
         target.write(chunk)
 
-if MODEL_SHA256:
-    digest = hashlib.sha256(OUTPUT.read_bytes()).hexdigest()
-    if digest != MODEL_SHA256:
-        OUTPUT.unlink(missing_ok=True)
-        raise SystemExit("MODEL_SHA256 integrity check failed; deployment aborted.")
+digest = hashlib.sha256(OUTPUT.read_bytes()).hexdigest()
+if digest != MODEL_SHA256:
+    OUTPUT.unlink(missing_ok=True)
+    raise SystemExit("MODEL_SHA256 integrity check failed; deployment aborted.")
 
 print(f"Model ready: {OUTPUT} ({OUTPUT.stat().st_size:,} bytes)")
