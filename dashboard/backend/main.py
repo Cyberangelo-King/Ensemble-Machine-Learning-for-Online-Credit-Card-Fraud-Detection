@@ -63,7 +63,11 @@ state = AppState()
 async def lifespan(app: FastAPI):
     """Load ML artefacts at startup; degrade gracefully if any are missing."""
     # --- Model ---
-    if os.path.exists(MODEL_PATH):
+    # Never deserialize a pickle/joblib artifact without a trusted digest.
+    if not MODEL_SHA256:
+        logger.error("MODEL_SHA256 is not configured; refusing to load model.")
+        state.model = None
+    elif os.path.exists(MODEL_PATH):
         try:
             if MODEL_SHA256:
                 with open(MODEL_PATH, "rb") as model_file:
