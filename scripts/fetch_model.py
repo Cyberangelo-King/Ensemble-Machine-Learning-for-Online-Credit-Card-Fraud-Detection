@@ -1,4 +1,4 @@
-"""Fetch a trained model bundle for deployment with an optional SHA-256 integrity check."""
+"""Fetch a trained model bundle and require a trusted SHA-256 integrity check."""
 from __future__ import annotations
 
 import hashlib
