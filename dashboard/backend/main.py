@@ -297,11 +297,21 @@ async def health_check() -> HealthResponse:
     version = "unknown"
     if isinstance(state.model, dict):
         version = str(state.model.get("model_version", "unknown"))
+    if not state.model_loaded:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unready",
+                "model_loaded": False,
+                "model_version": version,
+                "readiness": False,
+            },
+        )
     return HealthResponse(
         status="ok",
-        model_loaded=state.model_loaded,
+        model_loaded=True,
         model_version=version,
-        readiness=state.model_loaded,
+        readiness=True,
     )
 
 
