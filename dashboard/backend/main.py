@@ -383,57 +383,38 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
 
 @app.get("/explain/{index}", tags=["inference"])
 async def explain(index: int) -> Dict[str, Any]:
-    """
-    Return a SHAP explanation for a transaction at the given dataset index.
-    """
+    """Return a SHAP explanation using the same model-bundle inference path as /predict."""
     _require_model()
-
     if state.data is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Dataset is not loaded; explanation unavailable.",
-        )
+        raise HTTPException(status_code=503, detail="Dashboard dataset is unavailable.")
     if state.explainer is None:
-        raise HTTPException(
-            status_code=503,
-            detail="SHAP explainer is not initialised.",
-        )
+        raise HTTPException(status_code=503, detail="SHAP explainer is not initialised.")
     if index < 0 or index >= len(state.data):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Index {index} out of range (dataset has {len(state.data)} rows).",
-        )
+        raise HTTPException(status_code=404, detail=f"Index {index} out of range.")
 
     try:
-        feature_cols = _get_feature_columns(state.data)
-        row = state.data.iloc[[index]][feature_cols]
-
-        shap_values = state.explainer(row)
-
-        # shap_values.values shape may be (1, n_features) or (1, n_features, n_classes)
-        sv = shap_values.values
-        if sv.ndim == 3:
-            # Multi-class / binary output: take positive class (last)
-            sv = sv[:, :, -1]
-        shap_list = sv[0].tolist()
-
-        expected_value = _safe_expected_value(state.explainer)
-
+        raw_row = state.data.iloc[[index]]
+        engineered = _prepare_raw_dataframe(raw_row)
+        shap_values = state.explainer(engineered.to_numpy(dtype=float))
+        sv = np.asarray(shap_values.values)
+        if sv.ndim > 2:
+            sv = sv[..., -1]
+        base_values = np.asarray(shap_values.base_values).reshape(-1)
+        expected_value = float(base_values[-1]) if base_values.size else 0.0
+        probabilities, predictions = _predict_raw(raw_row)
         return {
             "index": index,
-            "features": feature_cols,
-            "shap_values": shap_list,
+            "features": list(engineered.columns),
+            "shap_values": sv[0].tolist(),
             "expected_value": expected_value,
-            "prediction": int(state.model.predict(row)[0]),
-            "fraud_probability": float(state.model.predict_proba(row)[0, 1]),
+            "prediction": int(predictions[0]),
+            "fraud_probability": float(probabilities[0]),
         }
     except HTTPException:
         raise
-    except Exception as exc:
-        logger.exception("Explain failed for index %d: %s", index, exc)
-        raise HTTPException(
-            status_code=500, detail=f"Explanation error: {exc}"
-        ) from exc
+    except Exception:
+        logger.exception("Explain failed for index %d", index)
+        raise HTTPException(status_code=500, detail="Explanation generation failed.")
 
 
 # ---------------------------------------------------------------------------
