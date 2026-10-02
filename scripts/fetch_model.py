@@ -13,8 +13,8 @@ OUTPUT = Path(os.environ.get("MODEL_OUTPUT", "results/stacking_model.pkl"))
 if not MODEL_URL:
     raise SystemExit("MODEL_URL is required for a production deployment.")
 
-if len(MODEL_SHA256) != 64:
-    raise SystemExit("MODEL_SHA256 must be a 64-character SHA-256 digest.")
+if len(MODEL_SHA256) != 64 or any(ch not in "0123456789abcdef" for ch in MODEL_SHA256):
+    raise SystemExit("MODEL_SHA256 must be a 64-character hexadecimal SHA-256 digest.")
 
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 print(f"Downloading trained model to {OUTPUT} ...")
