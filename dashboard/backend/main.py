@@ -216,6 +216,51 @@ def _safe_expected_value(explainer: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Model/data adapters
+# ---------------------------------------------------------------------------
+
+def _generate_dashboard_data(n_samples: int = 500, random_state: int = 42) -> pd.DataFrame:
+    rng = np.random.default_rng(random_state)
+    values = rng.standard_normal((n_samples, 28))
+    amount = rng.lognormal(3.5, 1.4, n_samples).clip(0, 25000)
+    times = rng.uniform(0, 172792, n_samples)
+    score = -0.8 * values[:, 13] - 0.6 * values[:, 11] - 0.5 * values[:, 9]
+    labels = (score + rng.normal(0, 1, n_samples) >= np.quantile(score, 0.95)).astype(int)
+    frame = pd.DataFrame(values, columns=[f"V{i}" for i in range(1, 29)])
+    frame["Amount"] = amount
+    frame["Time"] = times
+    frame["Class"] = labels
+    return frame
+
+
+def _prepare_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    required = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time"]
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing required columns: {missing}")
+    out = df[required].copy()
+    out["Amount_log"] = np.log1p(out["Amount"].astype(float))
+    out["Hour"] = (out["Time"].astype(float) % 86400) / 3600
+    feature_names = list(state.model.get("feature_names", []))
+    return out[feature_names]
+
+
+def _predict_matrix(matrix: np.ndarray) -> np.ndarray:
+    frame = pd.DataFrame(matrix, columns=list(state.model["feature_names"]))
+    scaled = state.model["scaler"].transform(frame)
+    meta = np.column_stack([
+        clf.predict_proba(scaled)[:, 1] for clf in state.model["base_learners"]
+    ])
+    return state.model["meta_learner"].predict_proba(meta)[:, 1]
+
+
+def _predict_raw(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    probabilities = _predict_matrix(_prepare_raw_dataframe(df).to_numpy(dtype=float))
+    threshold = float(state.model.get("optimal_threshold", 0.5))
+    return probabilities, (probabilities >= threshold).astype(int)
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
