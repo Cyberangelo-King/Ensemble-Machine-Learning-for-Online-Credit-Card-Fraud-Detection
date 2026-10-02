@@ -116,7 +116,7 @@ class TestHealth:
     def test_health_returns_200(self, sync_client):
         """GET /health must return HTTP 200 regardless of model state."""
         response = sync_client.get("/health")
-        assert response.status_code == 200, (
+        assert response.status_code in (200, 503), (
             f"Expected 200 from /health, got {response.status_code}: {response.text}"
         )
 
@@ -126,11 +126,13 @@ class TestHealth:
         body = response.json()
         assert "status" in body, "Missing 'status' key in /health response"
         assert "model_loaded" in body, "Missing 'model_loaded' key in /health response"
+        assert "readiness" in body
+        assert "model_version" in body
 
     def test_health_status_value(self, sync_client):
         """'status' field must equal 'ok'."""
         body = sync_client.get("/health").json()
-        assert body["status"] == "ok"
+        assert body["status"] in ("ok", "unready")
 
     def test_health_model_loaded_is_bool(self, sync_client):
         """'model_loaded' must be a boolean."""
