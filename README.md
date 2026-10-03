@@ -350,3 +350,31 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ---
 
 *Final Year Project — Federal University of Technology, Akure | Academic Year 2025–2026*
+
+
+## Engineering and security notes
+
+This repository separates **research evidence** from **deployment claims**. Benchmark metrics are snapshots tied to a documented dataset, split strategy and experiment configuration. They are not guarantees of live-world fraud performance.
+
+### Model supply-chain boundary
+
+Downloaded model bundles are accepted only when MODEL_SHA256 is present and matches the computed SHA-256 digest. The deployment path must fail closed when the trusted digest is absent or incorrect. This is important because joblib/pickle-style model loading can execute attacker-controlled code if an untrusted artifact is deserialized.
+
+### Production hardening roadmap
+
+- Signed model artifacts and provenance metadata
+- Immutable experiment/model identifiers
+- Calibration and threshold monitoring
+- Drift detection and alerting
+- Deterministic inference contract
+- Adversarial and malformed-input tests
+- Dependency and container scanning
+- Structured audit logs
+- Latency/error SLOs
+- Privacy review for transaction data
+
+## Research-to-product structure
+
+**Experiment → validate → explain → package → serve → monitor → review.**
+
+The companion FraudGuard repositories demonstrate the operational and educational surfaces around the research. They should not be confused with production payment infrastructure.
