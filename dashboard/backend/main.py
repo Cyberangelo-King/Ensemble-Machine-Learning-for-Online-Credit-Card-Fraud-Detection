@@ -18,6 +18,7 @@ import asyncio
 import json
 import time
 import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -70,8 +71,7 @@ async def lifespan(app: FastAPI):
     elif os.path.exists(MODEL_PATH):
         try:
             if MODEL_SHA256:
-                with open(MODEL_PATH, "rb") as model_file:
-                    digest = hashlib.sha256(model_file.read()).hexdigest()
+                digest = _sha256_file(MODEL_PATH)
                 if digest != MODEL_SHA256:
                     raise RuntimeError("MODEL_SHA256 integrity check failed")
             state.model = joblib.load(MODEL_PATH)
@@ -167,6 +167,15 @@ app.add_middleware(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Hash model artifacts incrementally before deserializing them."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _get_feature_columns(df: pd.DataFrame) -> List[str]:
     """Return feature columns (all except 'Class')."""
     return [c for c in df.columns if c != "Class"]
@@ -190,7 +199,7 @@ def _require_api_key(provided_key: Optional[str]) -> None:
             status_code=503,
             detail="Authentication is not configured. Set FRAUD_API_KEY before production startup.",
         )
-    if API_KEY and provided_key != API_KEY:
+    if API_KEY and not hmac.compare_digest(provided_key or "", API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
@@ -399,9 +408,15 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
 
 
 @app.get("/explain/{index}", tags=["inference"])
-async def explain(index: int) -> Dict[str, Any]:
-    """Return a SHAP explanation using the same model-bundle inference path as /predict."""
+async def explain(
+    index: int,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Return a SHAP explanation using the same protected inference path as /predict."""
     _require_model()
+    _require_api_key(x_api_key)
+    _check_rate_limit(request)
     if state.data is None:
         raise HTTPException(status_code=503, detail="Dashboard dataset is unavailable.")
     if state.explainer is None:
@@ -445,7 +460,8 @@ async def websocket_stream(websocket: WebSocket) -> None:
     if production_mode and not API_KEY:
         await websocket.close(code=1011, reason="API authentication is not configured.")
         return
-    if API_KEY and websocket.headers.get("x-api-key") != API_KEY:
+    provided_key = websocket.headers.get("x-api-key", "")
+    if API_KEY and not hmac.compare_digest(provided_key, API_KEY):
         await websocket.close(code=1008, reason="Invalid or missing API key.")
         return
     await websocket.accept()
