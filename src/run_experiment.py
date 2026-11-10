@@ -10,7 +10,7 @@ Architecture
 ------------
 Layer 0 (Base Learners):  Logistic Regression | Random Forest | XGBoost
 Layer 1 (Meta-Learner):   Logistic Regression trained on OOF meta-features
-Output:                   Probability of fraud, calibrated score, binary prediction
+Output:                   Fraud probability score and thresholded prediction
 
 Key Features
 ------------
@@ -21,7 +21,7 @@ Key Features
 - Ablation study: test 1, 2, and 3 base learners
 - Learning curves: AUPRC vs training-set size
 - SHAP summary + permutation importance
-- Calibration curves (Platt scaling)
+- Reliability curves (probability calibration diagnostics; no calibrator is fitted)
 - Comprehensive metrics: AUPRC, F1, MCC, ROC-AUC, Precision, Recall
 - Full figure export (ROC, PR curve, calibration, SHAP, learning curves, confusion matrix)
 - Checkpoint saving after each base-learner tuning step
@@ -83,7 +83,7 @@ from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
     learning_curve,
-    cross_val_predict,
+    train_test_split,
 )
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -124,9 +124,7 @@ CONFIG: Dict[str, Any] = {
     # ── Parallelism ──────────────────────────────────────────────────────────
     "n_jobs": -1,  # CV-level parallelism; individual estimators use one thread
     "split_strategy": "temporal",
-    # ── XGBoost early stopping ───────────────────────────────────────────────
-    "xgb_early_stopping_rounds": 20,
-    "xgb_eval_fraction": 0.1,         # fraction of train fold used as eval set
+    # ── XGBoost uses CV-selected estimator count; no shared eval_set ──────────
     # ── Logistic Regression hyperparameter grid ───────────────────────────────
     "lr_param_grid": {
         "C": [0.001, 0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0],
@@ -355,14 +353,12 @@ def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 
 def _pipeline(estimator: Any, cfg: Dict[str, Any], random_state: int) -> ImbPipeline:
     """Build a fold-safe preprocessing + sampling + classifier pipeline."""
-    positives = int(np.sum(np.asarray(cfg.get("_fit_labels", [])) == 1))
-    k_neighbors = min(5, max(1, positives - 1)) if positives else 5
     return ImbPipeline(steps=[
         ("scaler", StandardScaler()),
         ("smote", SMOTE(
             sampling_strategy=cfg["smote_sampling_strategy"],
             random_state=random_state,
-            k_neighbors=k_neighbors,
+            k_neighbors=5,
         )),
         ("classifier", estimator),
     ])
@@ -487,12 +483,25 @@ def _fit_fold(
     base_learners: List[Any],
     smote_ratio: float,
     random_state: int,
+    reference_X: Optional[np.ndarray] = None,
+    reference_y: Optional[np.ndarray] = None,
 ) -> Tuple[int, np.ndarray, np.ndarray]:
-    """Fit cloned fold-safe pipelines and return held-out probabilities."""
+    """
+    Fit cloned pipelines for one OOF fold.
+
+    reference_X/reference_y are an independent tuning partition that is
+    available to every fold. The OOF validation rows are never used for
+    hyperparameter selection or fitting.
+    """
     X_train, y_train = X[train_idx], y[train_idx]
+    if reference_X is not None or reference_y is not None:
+        if reference_X is None or reference_y is None:
+            raise ValueError("reference_X and reference_y must be supplied together.")
+        X_train = np.concatenate([reference_X, X_train], axis=0)
+        y_train = np.concatenate([reference_y, y_train], axis=0)
+
     X_valid = X[val_idx]
     fold_probs = np.zeros((len(val_idx), len(base_learners)), dtype=np.float32)
-
     for column, estimator in enumerate(base_learners):
         fitted = clone(estimator)
         fitted.fit(X_train, y_train)
@@ -510,21 +519,25 @@ def generate_oof_meta_features(
     n_jobs: int,
     random_state: int,
     desc: str = "OOF Stacking",
+    reference_X: Optional[np.ndarray] = None,
+    reference_y: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Build leakage-controlled out-of-fold meta-features.
+    Generate OOF meta-features using fold-safe preprocessing.
 
-    Every cloned base learner owns its scaler and SMOTE sampler.  Consequently,
-    both are fitted only on that fold's training partition; validation rows
-    are never transformed using statistics or synthetic neighbours learned
-    from the validation fold.
+    When reference data is supplied, it must be a disjoint training partition
+    used for hyperparameter tuning. Each OOF fold trains on that reference set
+    plus the non-held-out rows of X, while the held-out rows are used only for
+    out-of-fold prediction. Hyperparameter search must never see X/y.
     """
+    if (reference_X is None) != (reference_y is None):
+        raise ValueError("reference_X and reference_y must be supplied together.")
     splits = list(cv.split(X, y))
     _log_step(f"Generating OOF meta-features across {len(splits)} folds …")
     results = Parallel(n_jobs=n_jobs, prefer="threads")(
         delayed(_fit_fold)(
             fold_idx, train_idx, valid_idx, X, y, base_learners,
-            smote_ratio, random_state,
+            smote_ratio, random_state, reference_X, reference_y,
         )
         for fold_idx, (train_idx, valid_idx) in enumerate(
             tqdm(splits, desc=desc, unit="fold")
@@ -534,7 +547,6 @@ def generate_oof_meta_features(
     meta_features = np.zeros((len(y), len(base_learners)), dtype=np.float32)
     for _, fold_probs, valid_idx in results:
         meta_features[valid_idx] = fold_probs
-
     if not np.isfinite(meta_features).all():
         raise RuntimeError("OOF meta-feature matrix contains non-finite predictions.")
     _log_step(f"OOF meta-feature matrix: {meta_features.shape}")
@@ -619,25 +631,38 @@ def run_full_pipeline(
         f"test={X_test.shape}"
     )
 
+    # Isolate hyperparameter selection from the rows used to train the
+    # stacking meta-learner. Otherwise, selected hyperparameters would have
+    # indirectly seen the labels of every OOF validation row.
+    X_tune, X_stack, y_tune, y_stack = train_test_split(
+        X_train, y_train, test_size=0.25, stratify=y_train,
+        random_state=cfg["random_state"],
+    )
     cv = StratifiedKFold(
         n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"],
     )
     learners = [
-        _tune_logistic_regression(X_train, y_train, cv, cfg, checkpoint_dir),
-        _tune_random_forest(X_train, y_train, cv, cfg, checkpoint_dir),
-        _tune_xgboost(X_train, y_train, cv, cfg, checkpoint_dir),
+        _tune_logistic_regression(X_tune, y_tune, cv, cfg, checkpoint_dir),
+        _tune_random_forest(X_tune, y_tune, cv, cfg, checkpoint_dir),
+        _tune_xgboost(X_tune, y_tune, cv, cfg, checkpoint_dir),
     ]
 
-    _log_step("Generating out-of-fold training meta-features …")
+    _log_step("Generating OOF meta-features on a hyperparameter-disjoint stack partition …")
     meta_X_train = generate_oof_meta_features(
-        X_train, y_train, learners, cv,
+        X_stack, y_stack, learners, cv,
         cfg["smote_sampling_strategy"], cfg["n_jobs"], cfg["random_state"],
+        reference_X=X_tune, reference_y=y_tune,
     )
     meta_learner = LogisticRegression(
         C=cfg["meta_lr_C"], solver=cfg["meta_lr_solver"],
         max_iter=cfg["meta_lr_max_iter"], random_state=cfg["random_state"],
     )
-    meta_learner.fit(meta_X_train, y_train)
+    meta_learner.fit(meta_X_train, y_stack)
+
+    # Final base learners are refitted on the complete development-training
+    # partition only after the meta-learner has been fitted from OOF predictions.
+    for learner in learners:
+        learner.fit(X_train, y_train)
 
     meta_X_valid = _predict_base_meta_features(learners, X_valid)
     meta_X_test = _predict_base_meta_features(learners, X_test)
@@ -690,10 +715,13 @@ def run_full_pipeline(
             "dataset": "Kaggle ULB Credit Card Fraud Detection",
             "split_strategy": strategy,
             "training_rows": int(len(y_train)),
+            "base_hyperparameter_tuning_rows": int(len(y_tune)),
+            "meta_oof_rows": int(len(y_stack)),
             "validation_rows": int(len(y_valid)),
             "test_rows": int(len(y_test)),
             "threshold_selected_on": "validation partition",
             "test_set_used_for_threshold_selection": False,
+            "hyperparameter_tuning_rows_disjoint_from_oof_meta_rows": True,
         },
         "evaluation_protocol": {
             "threshold_selected_on": "held-out validation partition",
