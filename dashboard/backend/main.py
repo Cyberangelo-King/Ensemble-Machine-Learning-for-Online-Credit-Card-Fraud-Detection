@@ -436,7 +436,7 @@ async def explain(
         probabilities, predictions = _predict_raw(raw_row)
         return {
             "index": index,
-            "features": list(engineered.columns),
+            "feature_names": list(engineered.columns),
             "shap_values": sv[0].tolist(),
             "expected_value": expected_value,
             "prediction": int(predictions[0]),
@@ -455,7 +455,12 @@ async def explain(
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
-    """Replay sample dashboard rows through /predict; this is not a live card-network feed."""
+    """
+    Replay labelled sample rows through the research model (demo only).
+
+    The client controls start/stop and replay interval using JSON messages.
+    This endpoint is not connected to a live payment network or event feed.
+    """
     production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
     if production_mode and not API_KEY:
         await websocket.close(code=1011, reason="API authentication is not configured.")
@@ -464,34 +469,83 @@ async def websocket_stream(websocket: WebSocket) -> None:
     if API_KEY and not hmac.compare_digest(provided_key, API_KEY):
         await websocket.close(code=1008, reason="Invalid or missing API key.")
         return
+
     await websocket.accept()
-    logger.info("WebSocket client connected.")
+    logger.info("WebSocket sample replay client connected.")
+    running = False
+    interval_seconds = 1.0
+
     try:
         while True:
-            if state.model is None or state.data is None:
-                await websocket.send_json({"error": "Service is not ready", "model_loaded": False})
-                await asyncio.sleep(2)
-                continue
             try:
-                sample = state.data.sample(1, random_state=None)
-                probabilities, predictions = _predict_raw(sample)
-                payload: Dict[str, Any] = {
-                    "transaction_index": int(sample.index[0]),
-                    "fraud_probability": float(probabilities[0]),
-                    "prediction": int(predictions[0]),
-                    "features": {
-                        col: float(sample[col].iloc[0])
-                        for col in [f"V{i}" for i in range(1, 6)]
-                    },
-                }
-                if "Class" in sample.columns:
-                    payload["true_label"] = int(sample["Class"].iloc[0])
-                await websocket.send_json(payload)
-            except Exception:
-                logger.exception("Stream error")
-                await websocket.send_json({"error": "Prediction failed"})
-            await asyncio.sleep(1)
+                message = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=interval_seconds if running else None,
+                )
+                if not isinstance(message, dict):
+                    await websocket.send_json({"error": "Control message must be a JSON object."})
+                    continue
+
+                action = str(message.get("action", "")).strip().lower()
+                if action in {"start", "speed"}:
+                    requested_interval = float(message.get("interval", interval_seconds))
+                    if not np.isfinite(requested_interval):
+                        requested_interval = 1.0
+                    interval_seconds = float(np.clip(requested_interval, 0.1, 10.0))
+                    running = True
+                elif action == "stop":
+                    running = False
+                else:
+                    await websocket.send_json({"error": "Supported actions are start, stop and speed."})
+            except asyncio.TimeoutError:
+                if not running:
+                    continue
+                if state.model is None or state.data is None:
+                    await websocket.send_json({"error": "Service is not ready", "model_loaded": False})
+                    continue
+
+                try:
+                    sample = state.data.sample(1, random_state=None)
+                    original = sample.iloc[0]
+                    feature_columns = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time"]
+                    raw_features = {
+                        name: float(original[name])
+                        for name in feature_columns
+                        if name in sample.columns
+                    }
+                    started = time.perf_counter()
+                    probabilities, predictions = _predict_raw(sample)
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    probability = float(probabilities[0])
+                    prediction = int(predictions[0])
+                    actual = int(original["Class"]) if "Class" in sample.columns else None
+                    threshold = float(state.model.get("optimal_threshold", 0.5))
+                    risk_level = (
+                        "High" if prediction == 1
+                        else "Medium" if probability >= threshold * 0.5
+                        else "Low"
+                    )
+                    payload: Dict[str, Any] = {
+                        "index": int(sample.index[0]),
+                        "transaction_index": int(sample.index[0]),
+                        "timestamp": time.time(),
+                        "features": raw_features,
+                        "fraud_probability": probability,
+                        "probability": probability,
+                        "prediction": prediction,
+                        "actual": actual,
+                        "true_label": actual,
+                        "threshold": threshold,
+                        "risk_level": risk_level,
+                        "latency_ms": float(latency_ms),
+                        "model_version": str(state.model.get("model_version", "unknown")),
+                        "data_source": "synthetic_demo" if not os.path.exists(DATA_PATH) else "local_dataset_replay",
+                    }
+                    await websocket.send_json(payload)
+                except Exception:
+                    logger.exception("Sample replay prediction failed.")
+                    await websocket.send_json({"error": "Prediction failed"})
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected.")
+        logger.info("WebSocket sample replay client disconnected.")
     except Exception:
-        logger.exception("WebSocket stream crashed.")
+        logger.exception("WebSocket sample replay crashed.")
