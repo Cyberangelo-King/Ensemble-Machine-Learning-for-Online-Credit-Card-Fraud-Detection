@@ -39,6 +39,10 @@ Scaling and SMOTE live inside each imbalanced-learn pipeline. During cross-valid
 
 ---
 
+## Research integrity and roadmap
+
+See [`RESEARCH_AUDIT.md`](RESEARCH_AUDIT.md) for the data contract, leakage controls, evaluation protocol, current limitations and next research stages.
+
 ## Benchmark reporting status
 
 The historical tables in RESULTS.md are retained for traceability, not as current claims. The repository does not contain the original generated metrics artifact or a persisted test-prediction file, so those old values cannot be independently checked from the current checkout.
