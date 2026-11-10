@@ -67,6 +67,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from joblib import Memory, Parallel, delayed
 from scipy import stats
 from sklearn.calibration import calibration_curve
+from sklearn.dummy import DummyClassifier
 from sklearn.base import clone
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
@@ -856,6 +857,10 @@ def run_full_pipeline(
             ["Logistic Regression", "Random Forest", "XGBoost"], learners
         )
     }
+    dummy_baseline = DummyClassifier(strategy="prior")
+    dummy_baseline.fit(X_train, y_train)
+    dummy_prob = dummy_baseline.predict_proba(X_test)[:, 1]
+    dummy_baseline_test_metrics = compute_metrics(y_test, dummy_prob, threshold=0.5)
 
     LOG.info("Validation-selected operating threshold: %.6f", optimal_threshold)
     LOG.info("Final untouched test metrics (threshold 0.50): %s", metrics_05)
@@ -866,12 +871,14 @@ def run_full_pipeline(
     _save_confusion_matrix(y_test, test_prob, optimal_threshold, fig_dir)
     _save_calibration_curve(y_test, test_prob, fig_dir)
     try:
+        # Explainability and feature-importance choices are made on validation,
+        # never by inspecting the final test labels.
         _save_shap_summary(
-            meta_learner, meta_X_test,
+            meta_learner, meta_X_valid,
             feature_names=["LR_prob", "RF_prob", "XGB_prob"], fig_dir=fig_dir,
         )
         _save_permutation_importance(
-            meta_learner, meta_X_test, y_test,
+            meta_learner, meta_X_valid, y_valid,
             feature_names=["LR_prob", "RF_prob", "XGB_prob"], fig_dir=fig_dir,
         )
     except Exception as exc:
@@ -942,6 +949,7 @@ def run_full_pipeline(
         "optimal_threshold_value": float(optimal_threshold),
         "validation_threshold_metrics": validation_metrics,
         "base_model_test_metrics": base_model_test_metrics,
+        "dummy_baseline_test_metrics": dummy_baseline_test_metrics,
         "threshold_selection": {
             "method": "F1 maximisation",
             "selection_data": "held-out validation partition",
