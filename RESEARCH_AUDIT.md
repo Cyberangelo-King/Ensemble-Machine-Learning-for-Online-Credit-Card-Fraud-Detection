@@ -67,7 +67,7 @@ Inside the training partition:
 
 For this imbalanced problem:
 
-- **Average precision / AUPRC** is the primary ranking metric. Always show the positive-class prevalence as the no-skill reference for the evaluated partition.
+- **Average precision (AP)** is the primary ranking metric (stored under the `AUPRC` key). Compare it to a constant-prior `DummyClassifier` on the same final test partition; this establishes the test-prevalence reference.
 - ROC-AUC is supplementary and can look strong even when precision is poor at a low fraud prevalence.
 - Precision, recall, F1 and MCC depend on the chosen operating threshold.
 - The threshold in the final report is learned on validation data only.
@@ -102,7 +102,7 @@ The repeated stratified-split report is a descriptive sensitivity analysis. Its 
 ### Stage A — establish a defensible benchmark
 - Run the current experiment on the real CSV.
 - Record the dataset checksum, partition counts, fraud prevalence per partition, package versions, run configuration and generated artifact hashes.
-- Compare the stack with DummyClassifier, Logistic Regression, Random Forest and XGBoost on the exact same final chronological test partition.
+- Compare the stack with a DummyClassifier prior baseline, Logistic Regression, Random Forest and XGBoost on the exact same final chronological test partition.
 - Report confusion matrices and precision/recall operating points alongside AUPRC.
 
 ### Stage B — test whether the ensemble is worth its complexity
