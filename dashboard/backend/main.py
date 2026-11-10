@@ -75,8 +75,17 @@ async def lifespan(app: FastAPI):
                 if digest != MODEL_SHA256:
                     raise RuntimeError("MODEL_SHA256 integrity check failed")
             state.model = joblib.load(MODEL_PATH)
-            if not isinstance(state.model, dict) or "base_learners" not in state.model or "meta_learner" not in state.model or "scaler" not in state.model:
-                raise RuntimeError("Invalid model bundle schema")
+            if not isinstance(state.model, dict):
+                raise RuntimeError("Invalid model bundle schema: expected a dictionary")
+            required_keys = {"base_learners", "meta_learner", "feature_names"}
+            missing_keys = required_keys - set(state.model)
+            pipeline_preprocessing = bool(state.model.get("preprocessing_in_estimators", False))
+            legacy_scaler_available = state.model.get("scaler") is not None
+            if missing_keys or not (pipeline_preprocessing or legacy_scaler_available):
+                raise RuntimeError(
+                    f"Invalid model bundle schema: missing={sorted(missing_keys)}, "
+                    "or no supported preprocessing strategy is declared"
+                )
             logger.info("Model loaded from %s", MODEL_PATH)
         except Exception as exc:
             logger.warning("Failed to load model from %s: %s", MODEL_PATH, exc)
@@ -241,18 +250,29 @@ def _prepare_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Dataset is missing required columns: {missing}")
     out = df[required].copy()
     out["Amount_log"] = np.log1p(out["Amount"].astype(float))
-    out["Hour"] = (out["Time"].astype(float) % 86400) / 3600
+    # ULB Time is elapsed seconds from the first transaction, not clock time.
+    out["Hour"] = out["Time"].astype(float) / 3600.0
     feature_names = list(state.model.get("feature_names", []))
     return out[feature_names]
 
 
 def _predict_matrix(matrix: np.ndarray) -> np.ndarray:
-    frame = pd.DataFrame(matrix, columns=list(state.model["feature_names"]))
-    scaled = state.model["scaler"].transform(frame)
-    meta = np.column_stack([
-        clf.predict_proba(scaled)[:, 1] for clf in state.model["base_learners"]
+    """Predict using either a current pipeline bundle or a legacy demo bundle."""
+    feature_names = list(state.model["feature_names"])
+    frame = pd.DataFrame(matrix, columns=feature_names)
+    if state.model.get("preprocessing_in_estimators", False):
+        model_input = frame
+    else:
+        scaler = state.model.get("scaler")
+        if scaler is None:
+            raise RuntimeError("Legacy model bundle is missing its scaler.")
+        model_input = scaler.transform(frame)
+
+    meta_features = np.column_stack([
+        learner.predict_proba(model_input)[:, 1]
+        for learner in state.model["base_learners"]
     ])
-    return state.model["meta_learner"].predict_proba(meta)[:, 1]
+    return state.model["meta_learner"].predict_proba(meta_features)[:, 1]
 
 
 def _predict_raw(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -343,17 +363,15 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
             raise HTTPException(status_code=422, detail={"unknown_features": unknown})
         if not all(np.isfinite(float(v)) for v in feature_dict.values()):
             raise HTTPException(status_code=422, detail="All feature values must be finite numbers.")
-        if float(feature_dict["Amount"]) < 0:
-            raise HTTPException(status_code=422, detail="Amount must be non-negative.")
+        if float(feature_dict["Amount"]) < 0 or float(feature_dict["Time"]) < 0:
+            raise HTTPException(status_code=422, detail="Amount and Time must be non-negative.")
 
         row = dict(feature_dict)
         row["Amount_log"] = float(np.log1p(row["Amount"]))
-        row["Hour"] = float((row["Time"] % 86400) / 3600)
+        row["Hour"] = float(row["Time"] / 3600.0)
         expected_cols = list(state.model.get("feature_names", []))
         df_input = pd.DataFrame([{col: row[col] for col in expected_cols}], columns=expected_cols)
-        x_sc = state.model["scaler"].transform(df_input)
-        meta_x = np.column_stack([clf.predict_proba(x_sc)[:, 1] for clf in state.model["base_learners"]])
-        proba = float(state.model["meta_learner"].predict_proba(meta_x)[0, 1])
+        proba = float(_predict_matrix(df_input.to_numpy(dtype=float))[0])
         threshold = float(state.model.get("optimal_threshold", 0.5))
         pred = int(proba >= threshold)
 
