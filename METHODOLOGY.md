@@ -31,8 +31,8 @@ This project follows the **Cross-Industry Standard Process for Data Mining (CRIS
 
 **Objective:** Evaluate whether a stacked classifier can distinguish fraudulent from legitimate transactions on a public, highly imbalanced historical benchmark. The repository's API and dashboard demonstrate inference; they are not connected to a payment network or a live institution.
 
-**Business context:**  
-Credit card fraud costs financial institutions billions annually. The key challenge is the extreme class imbalance (0.172% fraud rate) which renders accuracy misleading — a classifier predicting "legitimate" for all transactions achieves 99.83% accuracy while being entirely useless for fraud detection.
+**Benchmark context:**  
+The key challenge is extreme class imbalance (0.172% fraud rate) which renders accuracy misleading — a classifier predicting "legitimate" for all transactions achieves 99.83% accuracy while being entirely useless for fraud detection.
 
 **Prospective research targets (not achieved or verified claims):**
 - Report AUPRC as the primary metric against the test-set prevalence baseline.
@@ -52,7 +52,7 @@ Credit card fraud costs financial institutions billions annually. The key challe
 **Initial exploration findings:**
 - 284,807 transactions; 492 fraud cases (0.172% imbalance ratio ≈ 1:578)
 - Features V1–V28 are the result of PCA transformation (anonymised for privacy)
-- `Amount`: transaction value in Euros (right-skewed, range £0.00–£25,691.16)
+- `Amount`: transaction value in dataset currency units (right-skewed; source maximum approximately 25,691)
 - `Time`: seconds elapsed since the first transaction in the dataset
 - V1 and V3 showed the strongest univariate discrimination between classes
 - Significant distributional shift between fraud and legitimate in V4, V11, V14
@@ -80,7 +80,7 @@ Three base learners selected for diversity and complementarity:
 
 | Model | Rationale |
 |---|---|
-| **Logistic Regression** | Provides well-calibrated probabilities, acts as a linear baseline within the ensemble, fast to tune |
+| **Logistic Regression** | Fast linear baseline with probability outputs; probability calibration is evaluated rather than assumed |
 | **Random Forest** | High-variance learner with natural feature importance; immune to feature scaling; handles non-linear interactions |
 | **XGBoost** | Gradient-boosted trees with regularisation; estimator count and other hyperparameters are selected by cross-validation |
 
