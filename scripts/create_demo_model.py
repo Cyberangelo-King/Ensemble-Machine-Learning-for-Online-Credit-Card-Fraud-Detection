@@ -266,10 +266,11 @@ def train_demo_model(
 
         try:
             X_fold_res, y_fold_res = fold_smote.fit_resample(X_fold_tr_sc, y_fold_tr)
-        except ValueError as e:
-            # Graceful fallback: use unaugmented fold
-            print(f"\n  [WARN] SMOTE failed on fold {fold_i}: {e}. Using unaugmented fold.")
-            X_fold_res, y_fold_res = X_fold_tr_sc, y_fold_tr
+        except ValueError as exc:
+            raise RuntimeError(
+                f"SMOTE failed on OOF fold {fold_i}; refusing to silently change the "
+                "training protocol for only one fold."
+            ) from exc
 
         for j, fitted_base_learner in enumerate([lr, rf, xgb_final]):
             # clone() returns an unfitted estimator with the same hyperparameters.
