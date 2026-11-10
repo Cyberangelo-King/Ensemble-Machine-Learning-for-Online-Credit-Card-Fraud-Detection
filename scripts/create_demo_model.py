@@ -351,6 +351,8 @@ def evaluate_model(
         }
 
     return {
+        "report_schema_version": 1,
+        "benchmark_status": "synthetic_demo",
         "threshold_0.5": _metrics(0.5),
         "threshold_optimal": _metrics(float(selected_threshold)),
         "optimal_threshold_value": float(selected_threshold),
@@ -491,6 +493,7 @@ def main() -> None:
         "optimal_threshold": metrics["optimal_threshold_value"],
         "preprocessing_in_estimators": False,
         "model_schema_version": "1.1",
+        "feature_schema_version": "ulb-pca-elapsed-hours-v1",
         "model_version": "synthetic-demo-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
         "training_note": "Synthetic demonstration data only; not the Kaggle benchmark.",
         "evaluation_protocol": {
