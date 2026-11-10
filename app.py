@@ -237,7 +237,7 @@ with st.sidebar:
     bundle = load_model()
     if bundle is not None:
         st.success("✅ Model loaded")
-        opt_thresh = bundle.get("optimal_threshold", 0.38)
+        opt_thresh = bundle.get("optimal_threshold", 0.5)
         st.caption(f"Optimal threshold: {opt_thresh:.3f}")
     else:
         st.warning("⚠️ No model found")
@@ -245,7 +245,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown(
-        "<div style='color:#888;font-size:0.75rem'>Final Year Project · 2024–25</div>",
+        "<div style='color:#888;font-size:0.75rem'>Research prototype · 2026</div>",
         unsafe_allow_html=True,
     )
 
@@ -366,7 +366,7 @@ elif page == "⚡ Simulator":
         )
         st.stop()
 
-    opt_thresh = bundle.get("optimal_threshold", 0.38)
+    opt_thresh = bundle.get("optimal_threshold", 0.5)
 
     with st.expander("💡 About the Features", expanded=False):
         st.markdown("""
@@ -561,7 +561,7 @@ elif page == "🔍 SHAP Explanations":
     if st.button("🔍 Explain This Transaction", type="primary"):
         with st.spinner("Computing SHAP values…"):
             fraud_prob, base_probs = predict_transaction(bundle, shap_features)
-            opt_thresh = bundle.get("optimal_threshold", 0.38)
+            opt_thresh = bundle.get("optimal_threshold", 0.5)
             verdict = "FRAUD" if fraud_prob >= opt_thresh else "LEGITIMATE"
 
         st.markdown(f"**Result:** `{verdict}` — Fraud probability: **{fraud_prob:.3f}**")
@@ -695,295 +695,253 @@ elif page == "🔍 SHAP Explanations":
 # ===========================================================================
 
 elif page == "📊 Metrics":
-    st.title("📊 Model Performance Metrics")
+    st.title("📊 Model Evaluation")
+    st.markdown("Evaluation reports are loaded from the latest saved results/metrics.json.")
 
     metrics_data = load_metrics()
-
-    if metrics_data:
+    if not metrics_data:
+        st.info(
+            "No saved evaluation report is available. Run the full experiment with the Kaggle dataset "
+            "to generate a final holdout report. The dashboard will not substitute historical or "
+            "synthetic scores for missing benchmark results."
+        )
+    else:
+        if metrics_data.get("note"):
+            st.warning(metrics_data["note"])
         m_opt = metrics_data.get("threshold_optimal", {})
         m_05 = metrics_data.get("threshold_0.5", {})
+        threshold = metrics_data.get("optimal_threshold_value")
+        selection = metrics_data.get("threshold_selection", {})
+        protocol = metrics_data.get("split_protocol", {})
 
-        tab1, tab2, tab3 = st.tabs(["Summary", "Figures", "Thresholds"])
+        if selection:
+            st.caption(
+                f"Operating threshold: {threshold:.5f} — selected using "
+                f"{selection.get('selection_data', selection.get('method', 'validation data'))}. "
+                f"Final test used for selection: {selection.get('test_set_used', 'not recorded')}."
+            )
+        if protocol:
+            st.caption(
+                f"Split protocol: {protocol.get('strategy', 'not recorded')} "
+                f"(train {protocol.get('train_fraction', '—')}, "
+                f"validation {protocol.get('validation_fraction', '—')}, "
+                f"test {protocol.get('test_fraction', '—')})."
+            )
 
-        with tab1:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### @ Optimal Threshold")
-                for metric in ["AUPRC", "F1", "MCC", "ROC_AUC", "Precision", "Recall"]:
-                    val = m_opt.get(metric, 0)
-                    st.metric(metric, f"{val:.4f}")
-            with col2:
-                st.markdown("#### @ Default Threshold (0.50)")
-                for metric in ["AUPRC", "F1", "MCC", "ROC_AUC", "Precision", "Recall"]:
-                    val = m_05.get(metric, 0)
-                    delta = m_opt.get(metric, 0) - val
-                    st.metric(metric, f"{val:.4f}", delta=f"{delta:+.4f}")
+        st.markdown("### Final holdout performance")
+        metrics = [
+            ("AUPRC", "Average precision"),
+            ("ROC_AUC", "ROC-AUC"),
+            ("F1", "F1-score"),
+            ("MCC", "Matthews correlation"),
+            ("Precision", "Precision"),
+            ("Recall", "Recall"),
+        ]
+        columns = st.columns(3)
+        for index, (key, label) in enumerate(metrics):
+            with columns[index % 3]:
+                value = m_opt.get(key)
+                st.metric(label, f"{float(value):.4f}" if value is not None else "—")
 
-        with tab2:
-            fig_paths = {
-                "ROC Curve": ["figures/roc_curve.png", "roc_curve.png"],
-                "PR Curve": ["figures/pr_curve.png", "pr_curve.png"],
-                "Confusion Matrix": ["figures/confusion_matrix.png", "confusion_matrix.png"],
-                "Calibration Curve": ["figures/calibration_curve.png", "calibration_curve.png"],
-            }
-            for fig_name, paths in fig_paths.items():
-                found = False
-                for p in paths:
-                    if Path(p).exists():
-                        st.markdown(f"**{fig_name}**")
-                        st.image(p, use_column_width=True)
-                        found = True
-                        break
-                if not found:
-                    st.info(f"{fig_name}: Not found. Run `python src/run_experiment.py` to generate.")
+        with st.expander("Compare with the fixed 0.50 decision threshold"):
+            comparison = []
+            for key, label in metrics:
+                comparison.append({
+                    "Metric": label,
+                    "At 0.50": m_05.get(key),
+                    "At validation-selected threshold": m_opt.get(key),
+                })
+            st.dataframe(pd.DataFrame(comparison), use_container_width=True, hide_index=True)
 
-        with tab3:
-            st.markdown("""
-            **Threshold Analysis**
-            
-            | Threshold | Precision | Recall | F1 |
-            |---|---|---|---|
-            | 0.20 | 0.762 | 0.921 | 0.834 |
-            | 0.30 | 0.844 | 0.891 | 0.867 |
-            | **0.38 (optimal)** | **0.901** | **0.862** | **0.881** |
-            | 0.50 (default) | 0.924 | 0.812 | 0.865 |
-            | 0.60 | 0.951 | 0.772 | 0.852 |
-            | 0.80 | 0.978 | 0.683 | 0.804 |
-            
-            The optimal threshold maximises F1 on the validation set.
-            """)
-    else:
-        st.info("No metrics found. Run `python src/run_experiment.py` or `python scripts/create_demo_model.py`.")
-        st.markdown("""
-        **Expected Results (from paper):**
-        | Metric | Value |
-        |---|---|
-        | AUPRC | 0.903 |
-        | F1 | 0.881 |
-        | MCC | 0.884 |
-        | ROC-AUC | 0.979 |
-        """)
+        fig_paths = {
+            "ROC Curve": ["figures/roc_curve.png", "roc_curve.png"],
+            "Precision–Recall Curve": ["figures/pr_curve.png", "pr_curve.png"],
+            "Confusion Matrix": ["figures/confusion_matrix.png", "confusion_matrix.png"],
+            "Calibration / Reliability Curve": ["figures/calibration_curve.png", "calibration_curve.png"],
+        }
+        for fig_name, candidates in fig_paths.items():
+            image_path = next((candidate for candidate in candidates if Path(candidate).exists()), None)
+            if image_path:
+                st.markdown(f"**{fig_name}**")
+                st.image(image_path, use_container_width=True)
+            else:
+                st.caption(f"{fig_name}: not generated for this run.")
 
-# ===========================================================================
+        st.caption(
+            "AUPRC and ROC-AUC are ranking metrics. F1, MCC, precision and recall depend on "
+            "the saved operating threshold. A reliability curve is diagnostic; it does not by "
+            "itself mean the probabilities have been calibrated."
+        )
+
 # PAGE: DATASET
 # ===========================================================================
 
 elif page == "📁 Dataset":
     st.title("📁 Dataset Explorer")
     st.markdown(
-        "**Kaggle Credit Card Fraud Detection** — 284,807 European cardholder transactions, "
-        "September 2013. Features V1–V28 are PCA-anonymised."
+        "Inspect the dataset currently available to the dashboard. The public ULB benchmark "
+        "contains PCA-anonymised V1–V28 features, Amount, Time and a binary Class label."
     )
 
     df = load_sample_data()
+    if df is None:
+        st.info(
+            "No local CSV preview is available. Place the Kaggle creditcard.csv file in data/, "
+            "or generate synthetic data for dashboard demonstration."
+        )
+    else:
+        total_rows = len(df)
+        fraud_count = int(df["Class"].sum()) if "Class" in df.columns else None
+        metrics_cols = st.columns(4)
+        metrics_cols[0].metric("Preview rows", f"{total_rows:,}")
+        metrics_cols[1].metric("Fraud rows in preview", f"{fraud_count:,}" if fraud_count is not None else "—")
+        metrics_cols[2].metric("Columns", f"{len(df.columns):,}")
+        metrics_cols[3].metric("Missing cells", f"{int(df.isna().sum().sum()):,}")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Transactions", "284,807")
-    col2.metric("Fraud Cases", "492 (0.17%)")
-    col3.metric("Features", "30")
-    col4.metric("Missing Values", "0")
-
-    if df is not None:
-        st.divider()
-        tab1, tab2, tab3 = st.tabs(["Sample Data", "Class Distribution", "Feature Distributions"])
-
-        with tab1:
-            st.markdown(f"Showing first {min(len(df), 100)} rows of loaded data")
-            st.dataframe(df.head(100), use_container_width=True)
-            st.caption(f"Loaded {len(df):,} rows | Fraud in sample: {df['Class'].sum():,} ({df['Class'].mean():.2%})")
-
-        with tab2:
-            try:
+        if "Class" not in df.columns:
+            st.warning("The current CSV preview has no Class label; supervised evaluation is unavailable.")
+        else:
+            tab1, tab2, tab3 = st.tabs(["Sample Data", "Class Distribution", "Feature Distributions"])
+            with tab1:
+                st.dataframe(df.head(100), use_container_width=True)
+                st.caption(f"Showing up to 100 of {total_rows:,} rows loaded by the dashboard.")
+            with tab2:
                 import matplotlib.pyplot as plt
-                fraud_count = df["Class"].value_counts()
-                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-                axes[0].bar(["Legitimate", "Fraud"], fraud_count.values,
-                            color=["#42a5f5", "#ef5350"])
-                axes[0].set_title("Class Distribution (count)")
-                axes[0].set_ylabel("Count")
-                for ax in axes:
-                    ax.grid(axis="y", alpha=0.3)
-                axes[1].pie(fraud_count.values, labels=["Legitimate", "Fraud"],
-                            colors=["#42a5f5", "#ef5350"], autopct="%1.3f%%",
-                            startangle=90)
-                axes[1].set_title("Class Distribution (%)")
-                plt.tight_layout()
+                counts = df["Class"].value_counts().reindex([0, 1], fill_value=0)
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.bar(["Legitimate", "Fraud"], counts.values)
+                ax.set_ylabel("Rows in loaded preview")
+                ax.set_title("Class Distribution — Loaded Preview")
+                ax.grid(axis="y", alpha=0.25)
                 st.pyplot(fig, use_container_width=True)
                 plt.close(fig)
-            except ImportError:
-                st.dataframe(df["Class"].value_counts())
-
-        with tab3:
-            selected_feat = st.selectbox(
-                "Select feature to visualise",
-                options=[f"V{i}" for i in range(1, 15)] + ["Amount", "Time"],
-            )
-            try:
+                st.caption("Preview proportions are not necessarily representative of the full dataset.")
+            with tab3:
+                candidates = [c for c in [f"V{i}" for i in range(1, 15)] + ["Amount", "Time"] if c in df.columns]
+                selected = st.selectbox("Select feature", options=candidates)
                 import matplotlib.pyplot as plt
                 fig, ax = plt.subplots(figsize=(10, 4))
-                legit = df[df["Class"] == 0][selected_feat]
-                fraud = df[df["Class"] == 1][selected_feat]
-                ax.hist(legit, bins=60, alpha=0.6, label="Legitimate", color="#42a5f5", density=True)
-                ax.hist(fraud, bins=60, alpha=0.8, label="Fraud", color="#ef5350", density=True)
-                ax.set_xlabel(selected_feat)
+                for label, name in [(0, "Legitimate"), (1, "Fraud")]:
+                    values = df.loc[df["Class"] == label, selected]
+                    if len(values):
+                        ax.hist(values, bins=50, alpha=0.55, label=name, density=True)
+                ax.set_xlabel(selected)
                 ax.set_ylabel("Density")
-                ax.set_title(f"Distribution of {selected_feat} by Class")
                 ax.legend()
-                plt.tight_layout()
+                ax.set_title(f"{selected} distribution by label")
                 st.pyplot(fig, use_container_width=True)
                 plt.close(fig)
-            except ImportError:
-                st.dataframe(df.groupby("Class")[selected_feat].describe())
-    else:
-        st.info(
-            "No dataset found. Download `creditcard.csv` from Kaggle and place it in `data/`, "
-            "or run `python scripts/generate_synthetic_data.py` to generate synthetic data."
-        )
-        st.markdown("""
-        **Dataset Properties:**
-        - Source: [Kaggle — mlg-ulb/creditcardfraud](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
-        - Rows: 284,807 transactions
-        - Columns: Time, V1–V28, Amount, Class
-        - V1–V28: PCA-transformed, anonymised features
-        - Class: 0 = legitimate, 1 = fraud
-        """)
 
-# ===========================================================================
 # PAGE: MODEL COMPARISON
 # ===========================================================================
 
 elif page == "🤖 Model Comparison":
     st.title("🤖 Model Comparison")
-    st.markdown("Performance comparison of all models, from the Logistic Regression baseline to the full stacking ensemble.")
-
-    comparison_data = {
-        "Model": ["Logistic Regression", "Decision Tree", "Naive Bayes", "Random Forest", "XGBoost", "**Stacking Ensemble**"],
-        "AUPRC": [0.790, 0.742, 0.683, 0.862, 0.890, 0.903],
-        "F1": [0.787, 0.754, 0.701, 0.843, 0.861, 0.881],
-        "MCC": [0.783, 0.748, 0.694, 0.841, 0.862, 0.884],
-        "ROC-AUC": [0.947, 0.901, 0.873, 0.964, 0.975, 0.979],
-        "Precision": [0.811, 0.781, 0.742, 0.872, 0.889, 0.901],
-        "Recall": [0.763, 0.729, 0.664, 0.817, 0.835, 0.862],
-    }
-    df_comparison = pd.DataFrame(comparison_data)
-    st.dataframe(
-        df_comparison.style.highlight_max(
-            subset=["AUPRC", "F1", "MCC", "ROC-AUC", "Precision", "Recall"],
-            color="#1b5e20",
-        ),
-        use_container_width=True,
-        hide_index=True,
+    st.markdown(
+        "Comparisons are populated from the current run's held-out test predictions. "
+        "No manually entered or historical benchmark scores are displayed as current results."
     )
 
-    try:
-        import matplotlib.pyplot as plt
-        metrics_to_plot = ["AUPRC", "F1", "MCC", "ROC-AUC"]
-        models = ["LR", "DT", "NB", "RF", "XGB", "Stack"]
-        fig, axes = plt.subplots(1, 4, figsize=(14, 4))
-        colours = ["#37474f", "#455a64", "#546e7a", "#1565c0", "#0d47a1", "#b71c1c"]
-        for ax, metric in zip(axes, metrics_to_plot):
-            vals = df_comparison[metric].values
-            bars = ax.bar(models, vals, color=colours, alpha=0.85, edgecolor="white")
-            ax.set_ylim(0.6, 1.02)
-            ax.set_title(metric, fontweight="bold")
-            ax.set_ylabel("Score")
-            ax.grid(axis="y", alpha=0.3)
-            for bar, val in zip(bars, vals):
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
-                        f"{val:.3f}", ha="center", va="bottom", fontsize=7.5, fontweight="bold")
-        plt.suptitle("Model Performance Comparison", fontsize=13, fontweight="bold", y=1.02)
-        plt.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-    except ImportError:
-        st.info("Install matplotlib for the comparison chart.")
+    metrics_data = load_metrics()
+    base_metrics = metrics_data.get("base_model_test_metrics", {}) if metrics_data else {}
+    ensemble_metrics = metrics_data.get("threshold_0.5", {}) if metrics_data else {}
 
-    st.divider()
-    st.markdown("""
-    **Ablation Study** — Adding base learners progressively:
-    
-    | Configuration | AUPRC | ΔvsPrev |
-    |---|---|---|
-    | XGBoost only | 0.890 | baseline |
-    | RF + XGBoost | 0.897 | +0.007 |
-    | **LR + RF + XGBoost (Full Ensemble)** | **0.903** | **+0.006** |
-    
-    Every additional base learner contributes measurably to the final AUPRC.
-    """)
+    if base_metrics and ensemble_metrics:
+        rows = []
+        for model_name in ["Logistic Regression", "Random Forest", "XGBoost"]:
+            if model_name in base_metrics:
+                item = base_metrics[model_name]
+                rows.append({
+                    "Model": model_name,
+                    "AUPRC": item.get("AUPRC"),
+                    "ROC-AUC": item.get("ROC_AUC"),
+                    "F1 @ 0.50": item.get("F1"),
+                    "MCC @ 0.50": item.get("MCC"),
+                    "Precision @ 0.50": item.get("Precision"),
+                    "Recall @ 0.50": item.get("Recall"),
+                })
+        rows.append({
+            "Model": "Stacking Ensemble",
+            "AUPRC": ensemble_metrics.get("AUPRC"),
+            "ROC-AUC": ensemble_metrics.get("ROC_AUC"),
+            "F1 @ 0.50": ensemble_metrics.get("F1"),
+            "MCC @ 0.50": ensemble_metrics.get("MCC"),
+            "Precision @ 0.50": ensemble_metrics.get("Precision"),
+            "Recall @ 0.50": ensemble_metrics.get("Recall"),
+        })
+        comparison = pd.DataFrame(rows)
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        chart_columns = ["AUPRC", "F1 @ 0.50", "MCC @ 0.50", "ROC-AUC"]
+        st.bar_chart(comparison.set_index("Model")[chart_columns])
+    else:
+        st.info(
+            "Per-learner test metrics are not available in this report yet. Run the full research "
+            "experiment to generate an apples-to-apples comparison on the same untouched test partition."
+        )
 
-# ===========================================================================
+    ablation_path = Path("results/ablation_results.csv")
+    if ablation_path.exists():
+        st.markdown("### Stacking ablation")
+        ablation = pd.read_csv(ablation_path)
+        st.dataframe(ablation, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No ablation report has been generated for the current checkout.")
+
 # PAGE: ABOUT
 # ===========================================================================
 
 elif page == "ℹ️ About":
     st.title("ℹ️ About This Project")
-
     st.markdown("""
-    ## Final Year Computer Science Project
-    
-    This dashboard is the interactive component of a **Final Year Project** investigating 
-    the application of stacking ensemble machine learning to credit card fraud detection.
-    
-    ### Project Objectives
-    
-    1. **Design** a leakage-free stacking ensemble pipeline combining Logistic Regression, 
-       Random Forest, and XGBoost under a Logistic Regression meta-learner
-    2. **Implement** SMOTE oversampling strictly within cross-validation folds to prevent 
-       data leakage
-    3. **Achieve** benchmark performance: AUPRC > 0.90, F1 > 0.88, MCC > 0.88
-    4. **Deploy** the system as a real-time, production-oriented web application
-    5. **Validate** results through statistical significance testing (5-run stability analysis)
-    
-    ### Technical Stack
-    
-    | Component | Technology |
+    ## Research prototype — credit-card transaction fraud detection
+
+    This repository studies a stacked classification approach built from Logistic
+    Regression, Random Forest and XGBoost, with a Logistic Regression meta-learner.
+    It is an academic/research prototype and a demonstration interface, not a
+    certified fraud-control system and not connected to a card network or bank.
+
+    ### Methodological controls
+
+    - Scaling and SMOTE are encapsulated in an imbalanced-learn pipeline so each
+      cross-validation fold fits transformations and synthetic samples using its
+      training rows only.
+    - Base-model meta-features are generated out of fold.
+    - The default evaluation protocol uses chronological train/validation/test
+      partitions. The validation partition selects the operating threshold; the
+      final test partition is not used for threshold selection.
+    - Synthetic dashboard data is a UI demonstration, not benchmark evidence.
+
+    ### Dataset and limitations
+
+    The public ULB benchmark is a small, anonymised historical dataset spanning
+    roughly two days. V1–V28 are PCA components, and Time is elapsed seconds since
+    the first transaction. This is insufficient to establish performance on
+    modern bank transactions, new institutions, evolving fraud patterns or a
+    genuine live stream. External validation, drift monitoring, human review,
+    operational controls and independent security assessment remain future work.
+
+    ### Technical stack
+
+    | Layer | Technology |
     |---|---|
-    | ML Framework | scikit-learn 1.3, XGBoost 2.0 |
-    | Oversampling | imbalanced-learn (SMOTE) |
+    | Modelling | Python, scikit-learn, XGBoost |
+    | Imbalance handling | imbalanced-learn / SMOTE |
     | Explainability | SHAP |
     | Dashboard | Streamlit |
-    | API Backend | FastAPI |
-    | Frontend | React + Tailwind + Vite |
-    | Deployment | Render.com |
-    | CI/CD | GitHub Actions |
-    
-    ### Key Methodological Contributions
-    
-    **Leakage-free SMOTE:** Applying SMOTE before cross-validation splits is a common 
-    mistake that inflates validation AUPRC by up to 0.04 points. This project implements 
-    SMOTE strictly inside each CV fold, ensuring no information from validation data 
-    contaminates the training process.
-    
-    **Threshold optimisation:** Rather than defaulting to P = 0.5, this project finds 
-    the F1-maximising operating threshold on the validation set (~0.38), recovering 
-    5 additional fraud cases per 101 without significantly increasing false positives.
-    
-    **Statistical validation:** All results are reported as mean ± std across 5 independent 
-    runs with 95% confidence intervals, ensuring results are not artefacts of a specific 
-    random seed.
-    
-    ### Results Summary
-    
-    | Metric | Stacking | vs Best Baseline | vs LR Baseline |
-    |---|---|---|---|
-    | AUPRC | **0.903** | +1.5% (vs XGB) | +14.3% (vs LR) |
-    | F1 | **0.881** | +2.3% (vs XGB) | +11.9% (vs LR) |
-    | MCC | **0.884** | +2.6% (vs XGB) | +12.9% (vs LR) |
-    
-    ### Repository
-    
-    [github.com/Cyberangelo-King/Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection](https://github.com/Cyberangelo-King/Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection)
-    
+    | Inference API | FastAPI |
+    | Frontend | React, Vite, Tailwind |
+    | CI | GitHub Actions |
+
     ### References
-    
-    - Dal Pozzolo et al. (2015). Calibrating probability with undersampling for unbalanced classification. SSCI.
-    - Chawla et al. (2002). SMOTE: Synthetic minority over-sampling technique. JMLR.
-    - Chen & Guestrin (2016). XGBoost: A scalable tree boosting system. KDD.
-    - Lundberg & Lee (2017). A unified approach to interpreting model predictions. NeurIPS.
+
+    - Chawla et al. (2002), SMOTE: Synthetic Minority Over-sampling Technique.
+    - Wolpert (1992), Stacked Generalization.
+    - Chen & Guestrin (2016), XGBoost: A Scalable Tree Boosting System.
+    - Lundberg & Lee (2017), A Unified Approach to Interpreting Model Predictions.
     """)
 
     st.divider()
     st.markdown(
-        "<div class='footer'>Built with Streamlit · Final Year Project 2024–25</div>",
+        "<div class='footer'>Built with Streamlit · Research prototype · 2026</div>",
         unsafe_allow_html=True,
     )
