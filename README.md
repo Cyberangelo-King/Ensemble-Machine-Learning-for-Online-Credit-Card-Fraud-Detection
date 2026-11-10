@@ -92,7 +92,8 @@ python src/run_experiment.py \
     --n-iter-xgb 50 \                   # XGBoost RandomizedSearch iterations
     --smote-ratio 0.15 \                # SMOTE minority:majority ratio
     --n-folds 5 \                       # StratifiedKFold folds
-    --n-stability-runs 5 \\              # Supplementary stability runs\n    --split-strategy temporal \\       # temporal (default) or stratified_random
+    --n-stability-runs 5 \\              # Supplementary stability runs
+    --split-strategy temporal \\       # temporal (default) or stratified_random
     --skip-ablation \                   # Optional: skip ablation study
     --skip-learning-curves              # Optional: skip learning curves
 ```
@@ -128,14 +129,14 @@ streamlit run app.py
 ```
 
 **Dashboard Pages:**
-- **Home** — Project overview, key metrics summary cards, and quick-start guide
+- **Home** — Project overview, saved run summary (explicitly labelled synthetic when using demo artifacts), and quick-start guide
 - **Transaction Simulator** — Enter transaction features and get real-time fraud probability
 - **SHAP Explanations** — SHAP waterfall chart showing per-feature contribution for any transaction
 - **Metrics** — Model performance visualisations (ROC, PR curve, confusion matrix)
 - **Dataset** — Dataset statistics, class distribution, feature distributions
 - **Model Comparison** — Side-by-side comparison of all base learners vs ensemble
 
-**Full-stack deployment** (FastAPI + React frontend):
+**Full-stack local demonstration** (FastAPI + React frontend; this is not a live payment-network integration):
 ```bash
 # Terminal 1: Start FastAPI backend
 cd dashboard/backend
@@ -166,6 +167,8 @@ npm install && npm run dev
 ---
 
 ## Project Structure
+
+The canonical experiment entry point is `src/run_experiment.py`. Older exploratory notebooks are retained as research history and may reflect earlier preprocessing/evaluation logic; use the script and the current methodology for reproducible runs.
 
 ```
 Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection/
