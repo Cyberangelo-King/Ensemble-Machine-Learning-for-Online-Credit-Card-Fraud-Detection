@@ -423,7 +423,7 @@ def _tune_logistic_regression(
     grid = {f"classifier__{key}": value for key, value in cfg["lr_param_grid"].items()}
     return _search_pipeline(
         pipeline, grid, X, y, cv, cfg["n_iter_lr"], cfg,
-        checkpoint_dir / "lr_best.pkl", "Logistic Regression",
+        checkpoint_dir / "lr_pipeline_v2_best.pkl", "Logistic Regression",
     )
 
 
@@ -441,7 +441,7 @@ def _tune_random_forest(
     grid = {f"classifier__{key}": value for key, value in cfg["rf_param_grid"].items()}
     return _search_pipeline(
         pipeline, grid, X, y, cv, cfg["n_iter_rf"], cfg,
-        checkpoint_dir / "rf_best.pkl", "Random Forest",
+        checkpoint_dir / "rf_pipeline_v2_best.pkl", "Random Forest",
     )
 
 
@@ -471,7 +471,7 @@ def _tune_xgboost(
     grid = {f"classifier__{key}": value for key, value in cfg["xgb_param_grid"].items()}
     return _search_pipeline(
         pipeline, grid, X, y, cv, cfg["n_iter_xgb"], cfg,
-        checkpoint_dir / "xgb_best.pkl", "XGBoost",
+        checkpoint_dir / "xgb_pipeline_v2_best.pkl", "XGBoost",
     )
 
 # ===========================================================================
@@ -649,6 +649,12 @@ def run_full_pipeline(
     validation_metrics = compute_metrics(y_valid, valid_prob, optimal_threshold)
     metrics_05 = compute_metrics(y_test, test_prob, threshold=0.5)
     metrics_opt = compute_metrics(y_test, test_prob, threshold=optimal_threshold)
+    base_model_test_metrics = {
+        name: compute_metrics(y_test, learner.predict_proba(X_test)[:, 1], threshold=0.5)
+        for name, learner in zip(
+            ["Logistic Regression", "Random Forest", "XGBoost"], learners
+        )
+    }
 
     LOG.info("Validation-selected operating threshold: %.6f", optimal_threshold)
     LOG.info("Final untouched test metrics (threshold 0.50): %s", metrics_05)
@@ -714,6 +720,7 @@ def run_full_pipeline(
         "threshold_optimal": metrics_opt,
         "optimal_threshold_value": float(optimal_threshold),
         "validation_threshold_metrics": validation_metrics,
+        "base_model_test_metrics": base_model_test_metrics,
         "threshold_selection": {
             "method": "F1 maximisation",
             "selection_data": "held-out validation partition",
