@@ -68,7 +68,7 @@ def download_verified_model(
         if downloaded == 0:
             raise ValueError("The downloaded model artifact is empty.")
         if digest.hexdigest() != expected_sha256:
-            raise ValueError("MODEL_SHA256 integrity check failed.")
+            raise ValueError("Downloaded artifact SHA-256 does not match MODEL_SHA256.")
         os.replace(temporary_path, output_path)
         return downloaded
     except Exception:
