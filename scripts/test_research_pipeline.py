@@ -18,6 +18,8 @@ from src.run_experiment import (  # noqa: E402
     _pipeline,
     _split_train_validation_test,
     _get_supplementary_training_data,
+    _build_cross_validator,
+    _oof_validation_indices,
     compute_metrics,
     generate_oof_meta_features,
     load_and_engineer_features,
@@ -112,6 +114,25 @@ def test_temporal_split_requires_chronological_loader_marker() -> None:
         assert "not marked as sorted" in str(exc)
     else:
         raise AssertionError("Temporal split must reject unverified input ordering.")
+
+
+def test_temporal_cross_validation_is_forward_chaining_and_covers_only_future_blocks() -> None:
+    y = np.tile(np.array([0, 1], dtype=np.int8), 300)
+    cfg = dict(CONFIG)
+    cfg["n_folds"] = 5
+
+    cv = _build_cross_validator(y, cfg, "temporal", seed=42)
+    splits = list(cv.split(np.arange(len(y))))
+    validation_indices = _oof_validation_indices(cv, np.zeros((len(y), 1)), y)
+
+    assert len(splits) == 5
+    for train_idx, valid_idx in splits:
+        assert train_idx.max() < valid_idx.min()
+        assert np.unique(y[train_idx]).size == 2
+        assert np.unique(y[valid_idx]).size == 2
+    assert validation_indices.min() > 0
+    assert validation_indices.max() == len(y) - 1
+    assert len(np.unique(validation_indices)) == len(validation_indices)
 
 
 def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> None:
