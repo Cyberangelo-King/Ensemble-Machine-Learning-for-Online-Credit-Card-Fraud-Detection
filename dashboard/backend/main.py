@@ -77,8 +77,12 @@ async def lifespan(app: FastAPI):
             state.model = joblib.load(MODEL_PATH)
             if not isinstance(state.model, dict):
                 raise RuntimeError("Invalid model bundle schema: expected a dictionary")
-            required_keys = {"base_learners", "meta_learner", "feature_names"}
+            required_keys = {"base_learners", "meta_learner", "feature_names", "feature_schema_version"}
             missing_keys = required_keys - set(state.model)
+            if state.model.get("feature_schema_version") != "ulb-pca-elapsed-hours-v1":
+                raise RuntimeError(
+                    "Unsupported feature schema: regenerate the model using the current elapsed-hours contract."
+                )
             pipeline_preprocessing = bool(state.model.get("preprocessing_in_estimators", False))
             legacy_scaler_available = state.model.get("scaler") is not None
             if missing_keys or not (pipeline_preprocessing or legacy_scaler_available):
