@@ -141,7 +141,17 @@ def load_model() -> Optional[Dict[str, Any]]:
     for path in MODEL_PATHS:
         if Path(path).exists():
             try:
-                return joblib.load(path)
+                bundle = joblib.load(path)
+                required = {"base_learners", "meta_learner", "feature_names"}
+                if not isinstance(bundle, dict) or not required.issubset(bundle):
+                    continue
+                if bundle.get("feature_schema_version") != "ulb-pca-elapsed-hours-v1":
+                    # Pre-v2 artifacts used a different Time/Hour contract.
+                    continue
+                pipeline_mode = bool(bundle.get("preprocessing_in_estimators", False))
+                if not pipeline_mode and bundle.get("scaler") is None:
+                    continue
+                return bundle
             except Exception:
                 continue
     return None
@@ -154,7 +164,11 @@ def load_metrics() -> Optional[Dict[str, Any]]:
         if Path(path).exists():
             try:
                 with open(path) as f:
-                    return json.load(f)
+                    report = json.load(f)
+                if report.get("benchmark_status") not in {"synthetic_demo", "experimental_benchmark"}:
+                    # Hide legacy reports whose split/threshold provenance is unknown.
+                    continue
+                return report
             except Exception:
                 continue
     return None
