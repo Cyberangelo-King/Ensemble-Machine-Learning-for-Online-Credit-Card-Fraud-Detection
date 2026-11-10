@@ -305,6 +305,24 @@ def preprocess(
 # METRICS
 # ===========================================================================
 
+def _validate_binary_probability_inputs(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Validate aligned binary labels and finite probabilities before scoring."""
+    labels = np.asarray(y_true).reshape(-1)
+    probabilities = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    if labels.size == 0 or labels.size != probabilities.size:
+        raise ValueError("y_true and y_prob must be non-empty arrays with matching lengths.")
+    if not np.isfinite(probabilities).all():
+        raise ValueError("y_prob must contain only finite values.")
+    if np.any((probabilities < 0.0) | (probabilities > 1.0)):
+        raise ValueError("y_prob must contain probabilities between 0 and 1.")
+    if not set(np.unique(labels)).issubset({0, 1}) or np.unique(labels).size != 2:
+        raise ValueError("y_true must contain both binary labels 0 and 1.")
+    return labels.astype(np.int8), probabilities
+
+
 def compute_metrics(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -333,7 +351,10 @@ def compute_metrics(
     -------
     dict of metric name → float value
     """
-    y_pred = (y_prob >= threshold).astype(int)
+    y_true, y_prob = _validate_binary_probability_inputs(y_true, y_prob)
+    if not np.isfinite(threshold) or not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError("threshold must be a finite value between 0 and 1.")
+    y_pred = (y_prob >= float(threshold)).astype(int)
     auprc = average_precision_score(y_true, y_prob)
     roc_auc = roc_auc_score(y_true, y_prob)
     f1 = f1_score(y_true, y_pred, zero_division=0)
@@ -358,30 +379,30 @@ def compute_metrics(
 
 def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
     """
-    Find the probability threshold that maximises F1-score on the validation set.
+    Select a validation-only F1 threshold.
 
-    Iterates over all unique thresholds from precision_recall_curve to find
-    the operating point with the best F1. Using the PR-curve thresholds is
-    more efficient than a uniform grid search.
-
-    Parameters
-    ----------
-    y_true : Ground-truth binary labels
-    y_prob : Predicted probabilities
-
-    Returns
-    -------
-    optimal_threshold : float
+    If several thresholds have effectively equal F1, prefer higher precision
+    and then the higher threshold. This deterministic tie-break reduces alert
+    volume without changing the primary F1 objective.
     """
+    y_true, y_prob = _validate_binary_probability_inputs(y_true, y_prob)
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
-    f1_scores = np.where(
-        (precisions + recalls) == 0,
-        0.0,
-        2 * precisions * recalls / (precisions + recalls + 1e-9),
+    if thresholds.size == 0:
+        raise ValueError("Cannot select a threshold from an empty precision-recall curve.")
+
+    f1_scores = np.divide(
+        2.0 * precisions[:-1] * recalls[:-1],
+        precisions[:-1] + recalls[:-1],
+        out=np.zeros_like(precisions[:-1], dtype=np.float64),
+        where=(precisions[:-1] + recalls[:-1]) > 0.0,
     )
-    # precision_recall_curve returns one more value than thresholds
-    best_idx = np.argmax(f1_scores[:-1])
-    return float(thresholds[best_idx])
+    max_f1 = float(np.max(f1_scores))
+    candidates = np.flatnonzero(np.isclose(f1_scores, max_f1, rtol=1e-10, atol=1e-12))
+    best_index = max(
+        candidates.tolist(),
+        key=lambda index: (float(precisions[index]), float(thresholds[index])),
+    )
+    return float(thresholds[best_index])
 
 
 # ===========================================================================
