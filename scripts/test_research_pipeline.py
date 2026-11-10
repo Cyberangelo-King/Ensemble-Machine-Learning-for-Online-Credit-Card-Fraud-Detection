@@ -138,6 +138,46 @@ def test_temporal_cross_validation_is_forward_chaining_and_covers_only_future_bl
     assert len(np.unique(validation_indices)) == len(validation_indices)
 
 
+def test_temporal_oof_meta_features_exclude_warmup_rows() -> None:
+    rng = np.random.default_rng(13)
+    reference_y = np.tile(np.array([0, 0, 0, 1], dtype=np.int8), 20)
+    stack_y = np.tile(np.array([0, 0, 0, 1], dtype=np.int8), 30)
+    reference_X = rng.normal(size=(len(reference_y), 4)).astype(np.float32)
+    stack_X = rng.normal(size=(len(stack_y), 4)).astype(np.float32)
+    reference_X[reference_y == 1, 0] += 1.2
+    stack_X[stack_y == 1, 0] += 1.2
+
+    cfg = dict(CONFIG)
+    cfg["n_folds"] = 5
+    cfg["smote_sampling_strategy"] = 0.5
+    cv = _build_cross_validator(
+        stack_y, cfg, "temporal", seed=13, reference_y=reference_y
+    )
+    learner = _pipeline(
+        LogisticRegression(max_iter=500, solver="liblinear"),
+        cfg,
+        random_state=13,
+    )
+    meta_features = generate_oof_meta_features(
+        stack_X,
+        stack_y,
+        [learner],
+        cv,
+        smote_ratio=0.5,
+        n_jobs=1,
+        random_state=13,
+        reference_X=reference_X,
+        reference_y=reference_y,
+    )
+    valid_indices = _oof_validation_indices(cv, stack_X, stack_y)
+    warmup = np.setdiff1d(np.arange(len(stack_y)), valid_indices)
+
+    assert len(warmup) > 0
+    assert np.all(meta_features[warmup] == 0.0)
+    assert np.all((meta_features[valid_indices] >= 0.0) & (meta_features[valid_indices] <= 1.0))
+    assert len(valid_indices) + len(warmup) == len(stack_y)
+
+
 def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> None:
     rng = np.random.default_rng(42)
     n_meta = 120
