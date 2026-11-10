@@ -84,26 +84,20 @@ def sync_client():
     - If BASE_URL env var is set: use httpx against a live server.
     - Otherwise: mount the ASGI app directly (no live server needed).
     """
-    import httpx
-
     if USE_LIVE_SERVER:
+        import httpx
         client = httpx.Client(base_url=LIVE_BASE_URL, timeout=10.0)
         yield client
         client.close()
     else:
-        # Import the FastAPI app.  If artefacts are missing the startup lifespan
-        # will log warnings and set state to None — endpoints that require the
-        # model will return 503, which we handle gracefully in the tests below.
+        # Starlette's TestClient manages the async ASGI transport and the
+        # FastAPI lifespan. httpx.ASGITransport is async-only and cannot be
+        # mounted directly on a synchronous httpx.Client.
         try:
+            from fastapi.testclient import TestClient
             from dashboard.backend.main import app
-            transport = httpx.ASGITransport(app=app)
-            client = httpx.Client(
-                transport=transport,
-                base_url="http://testserver",
-                timeout=10.0,
-            )
-            yield client
-            client.close()
+            with TestClient(app) as client:
+                yield client
         except ImportError as exc:
             pytest.skip(f"Could not import backend app: {exc}")
 
@@ -114,7 +108,7 @@ def sync_client():
 
 class TestHealth:
     def test_health_returns_200(self, sync_client):
-        """GET /health must return HTTP 200 regardless of model state."""
+        """GET /health reports ready (200) or not-ready (503) model state."""
         response = sync_client.get("/health")
         assert response.status_code in (200, 503), (
             f"Expected 200 from /health, got {response.status_code}: {response.text}"
@@ -124,6 +118,8 @@ class TestHealth:
         """Response body must have 'status' and 'model_loaded' keys."""
         response = sync_client.get("/health")
         body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert "status" in body, "Missing 'status' key in /health response"
         assert "model_loaded" in body, "Missing 'model_loaded' key in /health response"
         assert "readiness" in body
@@ -131,12 +127,18 @@ class TestHealth:
 
     def test_health_status_value(self, sync_client):
         """'status' field must equal 'ok'."""
-        body = sync_client.get("/health").json()
+        response = sync_client.get("/health")
+        body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert body["status"] in ("ok", "unready")
 
     def test_health_model_loaded_is_bool(self, sync_client):
         """'model_loaded' must be a boolean."""
-        body = sync_client.get("/health").json()
+        response = sync_client.get("/health")
+        body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert isinstance(body["model_loaded"], bool)
 
 
