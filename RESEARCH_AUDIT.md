@@ -62,6 +62,7 @@ Inside the training partition:
 - The operating threshold is selected on validation data and frozen before final test evaluation.
 
 The runner also supports a stratified-random split for supplementary comparisons. It must not be substituted for the default chronological evaluation when making forward-in-time claims.
+Stability, ablation and learning-curve analyses are restricted to the primary training partition only; validation and final-test rows are not reused by those supplementary analyses.
 
 ## 5. Metrics and interpretation
 
