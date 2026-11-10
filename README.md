@@ -84,18 +84,17 @@ The main pipeline supports extensive configuration via command-line flags:
 
 ```bash
 python src/run_experiment.py \
-    --data-path data/creditcard.csv \   # Path to creditcard.csv
-    --output-dir results/ \             # Model, metrics, checkpoints
-    --fig-dir figures/ \                # Exported figures
-    --n-jobs -1 \                       # Parallelism (-1 = all cores)
-    --n-iter-rf 30 \                    # RF RandomizedSearch iterations
-    --n-iter-xgb 50 \                   # XGBoost RandomizedSearch iterations
-    --smote-ratio 0.15 \                # SMOTE minority:majority ratio
-    --n-folds 5 \                       # StratifiedKFold folds
-    --n-stability-runs 5 \\              # Supplementary stability runs
-    --split-strategy temporal \\       # temporal (default) or stratified_random
-    --skip-ablation \                   # Optional: skip ablation study
-    --skip-learning-curves              # Optional: skip learning curves
+  --data-path data/creditcard.csv \
+  --output-dir results/ \
+  --fig-dir figures/ \
+  --n-jobs -1 \
+  --n-iter-rf 30 \
+  --n-iter-xgb 50 \
+  --smote-ratio 0.15 \
+  --n-folds 5 \
+  --n-stability-runs 5 \
+  --split-strategy temporal
+
 ```
 
 **Outputs produced:**
