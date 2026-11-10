@@ -38,6 +38,7 @@ python src/run_experiment.py --data-path data/creditcard.csv --output-dir result
 # Stdlib
 # ---------------------------------------------------------------------------
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -376,12 +377,34 @@ def _search_pipeline(
     label: str,
 ) -> ImbPipeline:
     """Tune a complete pipeline using training-only cross-validation."""
+    fingerprint_builder = hashlib.sha256()
+    fingerprint_builder.update(np.ascontiguousarray(X).view(np.uint8))
+    fingerprint_builder.update(np.ascontiguousarray(y).view(np.uint8))
+    fingerprint_builder.update(json.dumps({
+        "label": label,
+        "param_grid": param_grid,
+        "n_iter": n_iter,
+        "cv_splits": cv.n_splits,
+        "cv_shuffle": cv.shuffle,
+        "cv_random_state": cv.random_state,
+        "random_state": cfg["random_state"],
+        "smote_sampling_strategy": cfg["smote_sampling_strategy"],
+    }, sort_keys=True, default=str).encode("utf-8"))
+    fingerprint = fingerprint_builder.hexdigest()
+
     if checkpoint_path.exists():
-        LOG.info("Checkpoint found — loading %s pipeline.", label)
-        cached = joblib.load(checkpoint_path)
-        if not isinstance(cached, ImbPipeline):
-            raise RuntimeError(f"Invalid {label} checkpoint: expected an imbalanced-learn Pipeline.")
-        return cached
+        try:
+            cached = joblib.load(checkpoint_path)
+            if (
+                isinstance(cached, dict)
+                and cached.get("fingerprint") == fingerprint
+                and isinstance(cached.get("pipeline"), ImbPipeline)
+            ):
+                LOG.info("Matching checkpoint found — loading %s pipeline.", label)
+                return cached["pipeline"]
+            LOG.warning("Ignoring stale or legacy %s checkpoint; its fingerprint does not match.", label)
+        except Exception as exc:
+            LOG.warning("Could not use %s checkpoint (%s); recomputing.", label, exc)
 
     _log_step(f"Tuning {label} pipeline with fold-local scaling and SMOTE …")
     search = RandomizedSearchCV(
@@ -402,7 +425,11 @@ def _search_pipeline(
         "Best %s parameters: %s | CV AUPRC: %.5f",
         label, search.best_params_, search.best_score_,
     )
-    joblib.dump(search.best_estimator_, checkpoint_path)
+    joblib.dump({
+        "checkpoint_schema_version": 2,
+        "fingerprint": fingerprint,
+        "pipeline": search.best_estimator_,
+    }, checkpoint_path)
     _log_step(f"{label} pipeline checkpoint saved → {checkpoint_path}")
     return search.best_estimator_
 
