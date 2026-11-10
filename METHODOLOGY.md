@@ -153,7 +153,7 @@ The extreme imbalance (1:578) makes this one of the most challenging benchmark d
 
 ### 3.1 Memory Optimisation
 
-Loading V1–V28 as `float64` (Python default) consumes ~43 MB for this dataset. Specifying `float32` halves this to ~22 MB with no loss of discriminative precision (PCA components do not require double precision for this use case).
+The loader stores V1–V28 and the numeric transaction fields as float32 to reduce memory pressure. The exact peak-memory savings depend on pandas/NumPy copies and must be measured on the actual runtime; no precision-equivalence claim is made without a separate comparison.
 
 ```python
 dtype_map = {f"V{i}": "float32" for i in range(1, 29)}
@@ -237,7 +237,7 @@ Stacking (Wolpert, 1992) is a meta-learning technique where the predictions of b
 
 **Logistic Regression (base):**
 - Strong linear separation of PCA components (V1, V3 are highly informative)
-- Produces well-calibrated probability estimates
+- Produces probability scores; calibration must be evaluated separately and is not guaranteed by the estimator
 - Fast to train and tune (20 random configurations sufficient)
 - Regularisation via C parameter prevents overfitting on small fraud class
 
