@@ -217,6 +217,8 @@ def load_and_engineer_features(data_path: str) -> Tuple[pd.DataFrame, pd.Series]
         raise ValueError(f"Dataset is missing required columns: {missing}")
     if df[required].isna().any().any():
         raise ValueError("Dataset contains missing values in required columns.")
+    if not np.isfinite(df[required].to_numpy(dtype=np.float64)).all():
+        raise ValueError("Dataset contains non-finite values in required columns.")
     if not set(df["Class"].unique()).issubset({0, 1}) or df["Class"].nunique() != 2:
         raise ValueError("Class must contain both binary labels 0 and 1.")
     if (df["Amount"] < 0).any() or (df["Time"] < 0).any():
