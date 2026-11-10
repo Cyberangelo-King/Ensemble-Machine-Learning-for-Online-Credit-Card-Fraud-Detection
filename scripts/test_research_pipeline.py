@@ -48,6 +48,26 @@ def test_feature_engineering_uses_elapsed_hours_and_sorts_time(tmp_path: Path) -
     )
 
 
+def test_loader_rejects_infinite_feature_values(tmp_path: Path) -> None:
+    rows = 60
+    frame = pd.DataFrame({
+        **{f"V{i}": np.linspace(-1, 1, rows) for i in range(1, 29)},
+        "Amount": np.linspace(0, 100, rows),
+        "Time": np.arange(rows, dtype=float),
+        "Class": np.tile([0, 1], rows // 2),
+    })
+    frame.loc[0, "V7"] = np.inf
+    csv_path = tmp_path / "creditcard_nonfinite.csv"
+    frame.to_csv(csv_path, index=False)
+
+    try:
+        load_and_engineer_features(str(csv_path))
+    except ValueError as exc:
+        assert "non-finite" in str(exc)
+    else:
+        raise AssertionError("The loader must reject infinite feature values.")
+
+
 def test_temporal_split_is_disjoint_and_keeps_order() -> None:
     X = np.arange(400, dtype=np.float32).reshape(200, 2)
     y = np.tile(np.array([0, 1], dtype=np.int8), 100)
