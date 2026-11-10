@@ -132,7 +132,7 @@ streamlit run app.py
 
 **Dashboard Pages:**
 - **Home** — Project overview, saved run summary (explicitly labelled synthetic when using demo artifacts), and quick-start guide
-- **Transaction Simulator** — Enter transaction features and get real-time fraud probability
+- **Transaction Simulator** — Enter transaction features and get an immediate per-transaction fraud-probability estimate
 - **SHAP Explanations** — SHAP waterfall chart showing per-feature contribution for any transaction
 - **Metrics** — Model performance visualisations (ROC, PR curve, confusion matrix)
 - **Dataset** — Dataset statistics, class distribution, feature distributions
