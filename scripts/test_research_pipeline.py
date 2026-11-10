@@ -91,7 +91,7 @@ def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> Non
     X_reference[y_reference == 1, 0] += 1.5
 
     cfg = dict(CONFIG)
-    cfg["smote_sampling_strategy"] = 0.25
+    cfg["smote_sampling_strategy"] = 0.5
     pipeline = _pipeline(
         LogisticRegression(max_iter=500, solver="liblinear"),
         cfg,
@@ -103,7 +103,7 @@ def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> Non
         y_meta,
         [pipeline],
         StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-        smote_ratio=0.25,
+        smote_ratio=0.5,
         n_jobs=1,
         random_state=42,
         reference_X=X_reference,
@@ -113,7 +113,7 @@ def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> Non
     assert oof.shape == (n_meta, 1)
     assert np.isfinite(oof).all()
     assert np.all((oof >= 0.0) & (oof <= 1.0))
-    assert pipeline.named_steps["smote"].sampling_strategy == 0.25
+    assert pipeline.named_steps["smote"].sampling_strategy == 0.5
 
 
 def test_metrics_report_primary_and_threshold_dependent_scores() -> None:
