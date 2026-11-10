@@ -624,6 +624,34 @@ def _split_train_validation_test(
     return X_train, X_valid, X_test, y_train, y_valid, y_test
 
 
+def _get_supplementary_training_data(
+    X: pd.DataFrame,
+    y: pd.Series,
+    cfg: Dict[str, Any],
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Return only the primary experiment's training partition.
+
+    Stability, ablation and learning-curve analyses must not consume the
+    validation or final test rows. This keeps the final chronological holdout
+    isolated even when supplementary analyses are executed after evaluation.
+    """
+    X_array = X.to_numpy(dtype=np.float32)
+    y_array = y.to_numpy(dtype=np.int8)
+    ordered_by_time = bool(X.attrs.get("ordered_by_time", False))
+    X_train, _, _, y_train, _, _ = _split_train_validation_test(
+        X_array,
+        y_array,
+        cfg.get("split_strategy", "temporal"),
+        cfg["random_state"],
+        ordered_by_time=ordered_by_time,
+    )
+    training_frame = pd.DataFrame(X_train, columns=list(X.columns))
+    training_frame.attrs["ordered_by_time"] = ordered_by_time
+    training_labels = pd.Series(y_train, name=y.name or "Class", dtype="int8")
+    return training_frame, training_labels
+
+
 def _predict_base_meta_features(base_learners: List[Any], X: np.ndarray) -> np.ndarray:
     """Run raw feature rows through fitted preprocessing/model pipelines."""
     return np.column_stack([
@@ -796,6 +824,7 @@ def run_full_pipeline(
         "evaluation_limitations": {
             "external_dataset_validation": "not performed",
             "live_production_validation": "not performed",
+            "supplementary_analyses_use_training_partition_only": True,
         },
         "model_version": model_bundle["model_version"],
     }
@@ -1252,20 +1281,31 @@ def main() -> None:
     # ── Main experiment ───────────────────────────────────────────────────
     results = run_full_pipeline(X, y, CONFIG, output_dir, fig_dir, checkpoint_dir)
 
+    # Supplementary analyses are restricted to the primary training
+    # partition. Neither the validation rows nor final test rows are reused.
+    X_supplementary, y_supplementary = _get_supplementary_training_data(X, y, CONFIG)
+    _log_step(
+        f"Supplementary analyses restricted to primary training rows: "
+        f"{len(y_supplementary):,}"
+    )
+
     # ── Stability analysis ────────────────────────────────────────────────
     stability = run_stability_analysis(
-        X, y, CONFIG, output_dir, fig_dir, args.n_stability_runs
+        X_supplementary, y_supplementary,
+        CONFIG, output_dir, fig_dir, args.n_stability_runs
     )
 
     # ── Ablation study ────────────────────────────────────────────────────
     if not args.skip_ablation:
-        ablation_df = run_ablation_study(X, y, CONFIG, output_dir)
+        ablation_df = run_ablation_study(
+            X_supplementary, y_supplementary, CONFIG, output_dir
+        )
     else:
         LOG.info("Ablation study skipped (--skip-ablation).")
 
     # ── Learning curves ───────────────────────────────────────────────────
     if not args.skip_learning_curves:
-        run_learning_curves(X, y, CONFIG, fig_dir)
+        run_learning_curves(X_supplementary, y_supplementary, CONFIG, fig_dir)
     else:
         LOG.info("Learning curves skipped (--skip-learning-curves).")
 
