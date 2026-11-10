@@ -88,7 +88,7 @@ The run can be computationally expensive. No benchmark metric is considered curr
 ## 4. Render Blueprint deployment (public demo only)
 
 The checked-in `render.yaml` defines:
-- a Python/FastAPI web service;
+- a Python 3.11/FastAPI web service;
 - a static Vite frontend served by Render's static-site infrastructure;
 - HTTPS/WSS URLs from the frontend to the API;
 - a restricted CORS origin;
