@@ -439,6 +439,7 @@ async def explain(
         return {
             "index": index,
             "feature_names": list(engineered.columns),
+            "features": list(engineered.columns),  # Backward-compatible field used by the dashboard/tests.
             "shap_values": sv[0].tolist(),
             "expected_value": expected_value,
             "prediction": int(predictions[0]),
