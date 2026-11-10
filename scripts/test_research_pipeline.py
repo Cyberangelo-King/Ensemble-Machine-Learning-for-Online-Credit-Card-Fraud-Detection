@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
@@ -216,6 +217,26 @@ def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> Non
     assert np.isfinite(oof).all()
     assert np.all((oof >= 0.0) & (oof <= 1.0))
     assert pipeline.named_steps["smote"].sampling_strategy == 0.5
+
+
+def test_dummy_prior_baseline_matches_test_prevalence() -> None:
+    from sklearn.dummy import DummyClassifier
+
+    y_train = np.array([0] * 90 + [1] * 10, dtype=np.int8)
+    y_test = np.array([0] * 18 + [1] * 2, dtype=np.int8)
+    X_train = np.zeros((len(y_train), 2), dtype=np.float32)
+    X_test = np.zeros((len(y_test), 2), dtype=np.float32)
+
+    baseline = DummyClassifier(strategy="prior")
+    baseline.fit(X_train, y_train)
+    probabilities = baseline.predict_proba(X_test)[:, 1]
+    metrics = compute_metrics(y_test, probabilities, threshold=0.5)
+
+    assert np.allclose(probabilities, y_train.mean())
+    assert metrics["AUPRC"] == pytest.approx(y_test.mean())
+    assert metrics["ROC_AUC"] == pytest.approx(0.5)
+    assert metrics["TP"] == 0
+    assert metrics["FP"] == 0
 
 
 def test_metrics_report_primary_and_threshold_dependent_scores() -> None:
