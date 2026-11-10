@@ -207,7 +207,7 @@ The default experiment sorts records by the source Time field and partitions the
 
 The chronological order is preserved when the source dataset is loaded. The validation and final test partitions are never included in hyperparameter fitting or SMOTE. The validation set selects an operating threshold; the same frozen threshold is then applied to the final test scores.
 
-Within the training partition, temporal experiments use expanding-window TimeSeriesSplit folds. The tuning subset is an early chronological prefix; OOF stacking rows are taken from a later suffix. Each OOF model sees only the earlier prefix plus earlier rows from the stack suffix, never later transactions. The first warm-up block in the stack suffix has no OOF prediction and is excluded from meta-learner fitting. A stratified-random protocol is available only as an explicitly optional comparison.
+Within the training partition, temporal experiments use expanding-window TimeSeriesSplit folds. The tuning subset is an early chronological prefix; OOF stacking rows are taken from a later suffix. Each OOF model sees only the earlier prefix plus earlier rows from the stack suffix, never later transactions. The first warm-up block in the stack suffix has no OOF prediction; its placeholder rows are excluded from meta-learner fitting. A stratified-random protocol is available only as an explicitly optional comparison.
 
 ## 4. Stacking Ensemble Architecture
 
