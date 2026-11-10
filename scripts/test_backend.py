@@ -4,7 +4,7 @@ pytest test suite for the Fraud Detection FastAPI backend.
 
 Usage
 -----
-Without a live server (default — uses httpx.AsyncClient with ASGI transport):
+Without a live server (default — uses FastAPI TestClient with ASGI lifespan):
     pytest scripts/test_backend.py -v
 
 Against a live server (set BASE_URL env var):
@@ -17,8 +17,20 @@ WebSocket tests require the optional `websocket-client` package:
 from __future__ import annotations
 
 import os
+import sys
 import importlib
+from pathlib import Path
+
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dashboard.backend import main as backend_main  # noqa: E402
+from dashboard.backend.main import app  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Optional imports
@@ -82,7 +94,7 @@ def sync_client():
     Return a synchronous test client.
 
     - If BASE_URL env var is set: use httpx against a live server.
-    - Otherwise: mount the ASGI app directly (no live server needed).
+    - Otherwise: use Starlette's TestClient and run the FastAPI lifespan.
     """
     if USE_LIVE_SERVER:
         import httpx
@@ -90,18 +102,8 @@ def sync_client():
         yield client
         client.close()
     else:
-        # Starlette's TestClient manages the async ASGI transport and the
-        # FastAPI lifespan. httpx.ASGITransport is async-only and cannot be
-        # mounted directly on a synchronous httpx.Client.
-        try:
-            from fastapi.testclient import TestClient
-from fastapi import HTTPException
-            from dashboard.backend import main as backend_main
-from dashboard.backend.main import app
-            with TestClient(app) as client:
-                yield client
-        except ImportError as exc:
-            pytest.skip(f"Could not import backend app: {exc}")
+        with TestClient(app) as client:
+            yield client
 
 
 # =============================================================================
