@@ -2,7 +2,7 @@
 
 > **Document type:** Technical Methodology Report  
 > **Project:** Final Year Computer Science Project  
-> **Version:** 2.0  
+> **Version:** 3.0 — aligned with revised research runner (10 November 2026)
 
 ---
 
@@ -29,16 +29,16 @@ This project follows the **Cross-Industry Standard Process for Data Mining (CRIS
 
 ### Phase 1: Business Understanding
 
-**Objective:** Detect fraudulent credit card transactions in real time with minimal false negatives (missed fraud) while maintaining acceptable false positive rates (incorrectly flagged legitimate transactions).
+**Objective:** Evaluate whether a stacked classifier can distinguish fraudulent from legitimate transactions on a public, highly imbalanced historical benchmark. The repository's API and dashboard demonstrate inference; they are not connected to a payment network or a live institution.
 
 **Business context:**  
 Credit card fraud costs financial institutions billions annually. The key challenge is the extreme class imbalance (0.172% fraud rate) which renders accuracy misleading — a classifier predicting "legitimate" for all transactions achieves 99.83% accuracy while being entirely useless for fraud detection.
 
-**Success criteria:**
-- AUPRC > 0.90 (vs. baseline LR: 0.79)
-- F1-score > 0.88 at the optimal operating threshold
-- MCC > 0.88 (accounts for class imbalance correctly)
-- Inference latency < 5 ms per transaction (production requirement)
+**Prospective research targets (not achieved or verified claims):**
+- Report AUPRC as the primary metric against the test-set prevalence baseline.
+- Report F1, MCC, precision and recall at a threshold selected only on validation data.
+- Compare the default 0.50 decision threshold with the validation-selected operating point.
+- Measure inference latency on a named hardware/software environment before making latency claims.
 
 **Stakeholder considerations:**
 - *Risk teams* prioritise recall (catching fraud), accepting some false positives
@@ -60,7 +60,7 @@ Credit card fraud costs financial institutions billions annually. The key challe
 **Key observations driving design decisions:**
 1. The extreme imbalance requires oversampling (SMOTE) or cost-sensitive learning
 2. Amount requires log-transformation due to right skew
-3. Time encodes intra-day patterns; converting to Hour is more informative
+3. Time records elapsed seconds since the first observation; the engineered Hour variable is elapsed hours, not a real-world clock hour
 4. V1–V28 features are already standardised by PCA, but Amount and engineered features require explicit scaling
 
 ### Phase 3: Data Preparation
@@ -68,10 +68,10 @@ Credit card fraud costs financial institutions billions annually. The key challe
 Full details in [Section 3](#3-preprocessing-pipeline). Summary:
 
 1. **Memory optimisation:** V1–V28, Amount, Time loaded as `float32` (halving memory vs. `float64`)
-2. **Feature engineering:** `Amount_log = log1p(Amount)`, `Hour = (Time % 86400) / 3600`
-3. **Train/test split:** 80/20 stratified split, preserving class ratio in both partitions
-4. **Scaling:** StandardScaler fitted on training fold only (never on test/validation data)
-5. **Oversampling:** SMOTE applied strictly within each CV fold (leakage-free)
+2. **Feature engineering:** Amount_log = log1p(Amount), Hour = Time / 3600 (elapsed hours from dataset start)
+3. **Partitioning:** chronological 70/15/15 training, validation and final test partitions by source Time
+4. **Scaling:** StandardScaler lives inside each imbalanced-learn pipeline and is fitted on each CV training fold only
+5. **Oversampling:** SMOTE lives inside the same pipeline and is applied only to each CV training fold
 6. **Feature selection:** All 30 features retained (28 PCA + Amount_log + Hour); Time and raw Amount dropped post-engineering
 
 ### Phase 4: Modelling
@@ -82,7 +82,7 @@ Three base learners selected for diversity and complementarity:
 |---|---|
 | **Logistic Regression** | Provides well-calibrated probabilities, acts as a linear baseline within the ensemble, fast to tune |
 | **Random Forest** | High-variance learner with natural feature importance; immune to feature scaling; handles non-linear interactions |
-| **XGBoost** | Strong gradient boosting baseline; early stopping is used to control overfitting |
+| **XGBoost** | Gradient-boosted trees with regularisation; estimator count and other hyperparameters are selected by cross-validation |
 
 Meta-learner: Logistic Regression — a simple linear model is intentionally chosen to avoid overfitting on only 3 meta-features.
 
@@ -92,16 +92,18 @@ Hyperparameter optimisation: `RandomizedSearchCV` with `StratifiedKFold(n_splits
 
 - **Primary metric:** AUPRC (Area Under Precision-Recall Curve) — most informative for imbalanced classification
 - **Secondary metrics:** F1 at optimal threshold, MCC, ROC-AUC, Precision, Recall, confusion matrix
-- **Threshold analysis:** Both 0.5 (default) and F1-optimal threshold reported
-- **Statistical validation:** 5-run stability analysis with 95% confidence intervals
+- **Threshold analysis:** Both 0.5 and a threshold selected on a separate validation partition are reported on the untouched final test partition
+- **Supplementary stability:** repeated stratified random splits with 95% t-intervals; this is not a substitute for chronological evaluation
 - **Ablation study:** Performance compared across 1-, 2-, and 3-learner configurations
 
 ### Phase 6: Deployment
 
-The system is deployed as:
-1. A **Streamlit dashboard** (standalone demo, accessible at [Render.com](https://render.com/))
-2. A **FastAPI REST + WebSocket backend** for production integration
-3. A **React + Tailwind frontend** providing real-time inference and SHAP explanations
+The repository includes:
+1. A **Streamlit dashboard** for local demonstration
+2. A **FastAPI REST + WebSocket backend** for model inference demonstrations
+3. A **React + Tailwind frontend** for interacting with the API
+
+These components are deployment scaffolding and a research demonstration; they are not evidence of integration with a bank or production payment infrastructure.
 
 Deployment documentation: [DEPLOYMENT.md](DEPLOYMENT.md)
 
@@ -133,7 +135,7 @@ Deployment documentation: [DEPLOYMENT.md](DEPLOYMENT.md)
 | Amount | float32 | Transaction value in Euros |
 | Time | float32 | Seconds elapsed since dataset start |
 | Amount_log | float32 | `log1p(Amount)` — normalises right skew |
-| Hour | float32 | `(Time % 86400) / 3600` — hour of day (0–24) |
+| Hour | float32 | `Time / 3600` — elapsed hours since the first transaction (approximately 0–48) |
 | Class | int | Target: 0 = legitimate, 1 = fraud |
 
 ### Class Distribution
@@ -163,59 +165,49 @@ df = pd.read_csv(path, dtype=dtype_map)
 ### 3.2 Feature Engineering
 
 **Amount_log:**
-```
-Amount_log = log(1 + Amount)
-```
-The transaction `Amount` follows a right-skewed distribution (median €22, mean €88, max €25,691). Log-transformation compresses the tail, making the distribution approximately normal. `log1p` (log(1+x)) is used rather than `log(x)` to handle zero-amount transactions gracefully.
 
-**Hour:**
-```
-Hour = (Time mod 86400) / 3600
-```
-`Time` in the raw dataset is seconds since the dataset epoch. Converting to hour-of-day (0.0–24.0) captures circadian fraud patterns — fraudulent transactions are disproportionately concentrated in low-activity hours (02:00–06:00). This feature is known in the fraud detection literature to be highly predictive.
+    Amount_log = log(1 + Amount)
+
+The transaction Amount distribution is right-skewed. The log1p transformation compresses large values and safely handles zero-amount transactions.
+
+**Hour (elapsed time):**
+
+    Hour = Time / 3600
+
+The ULB dataset's Time field records seconds elapsed between a transaction and the first transaction in the dataset. It is not a timestamp or a time-of-day field. Hour therefore represents elapsed hours on the dataset timeline (approximately 0–48), not a circadian or local-clock feature. The dashboard labels it accordingly.
 
 ### 3.3 Leakage-Free Scaling and SMOTE
 
-**Why SMOTE must be inside CV:**
+**Why preprocessing must be inside CV:**
 
-Data leakage occurs when information from the validation set influences any part of the training process. Applying SMOTE before splitting creates synthetic minority samples that are derived from **all** minority instances — including those that will be held out as validation data. This means the model trains on synthetic points that are "aware" of the validation set, producing optimistic (inflated) validation metrics.
+Fitting a scaler before cross-validation allows validation-fold observations to influence the means and variances used by the transformation. Applying SMOTE before the fold split is more serious: synthetic minority samples can be generated using neighbours from observations that later appear in the validation fold.
 
-The correct pipeline:
+The current runner uses an imbalanced-learn Pipeline for each base learner. The ordered steps are:
 
-```
-WRONG (leaky):
-  SMOTE(X, y)  →  split  →  train | val
-  [synthetic samples may contain info from val]
+    StandardScaler -> SMOTE -> classifier
 
-CORRECT (leakage-free):
-  split  →  train | val
-  SMOTE(X_train, y_train)  →  X_train_aug | val (unchanged)
-  scaler.fit(X_train)  →  scaler.transform(X_train_aug, X_val)
-```
+The complete pipeline is cloned and fitted separately inside each CV training fold. The held-out fold is passed only to predict_proba. Hyperparameter search receives the original, unscaled, unresampled X and y. It does not receive a globally oversampled matrix.
 
-The scaler is also fitted on the training fold only. Fitting on the full dataset before splitting would leak validation statistics (mean, std) into the scaler, biasing the normalisation.
+This rule also applies during OOF meta-feature generation and learning-curve evaluation. The final model bundle stores the preprocessing steps inside each base learner, keeping training and inference feature handling consistent.
 
 **SMOTE parameters:**
-- `sampling_strategy=0.15`: Creates synthetic fraud samples until fraud:legitimate = 0.15 (1:6.67), yielding ~42,647 fraud samples per fold
-- `random_state=seed`: Fully reproducible oversampling
-- Synthetic samples are generated only in the feature space of the training fold, not the raw observations
+- sampling_strategy=0.15: targets a minority-to-majority ratio of 0.15 within each CV training fold
+- random_state: fixed per experiment/fold for reproducibility
+- k_neighbors: configured by SMOTE; folds must contain enough minority examples
 
-### 3.4 Train / Test Split
+### 3.4 Train / Validation / Test Split
 
-```python
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.2,
-    stratify=y,        # preserves 0.172% fraud rate in both partitions
-    random_state=42,
-)
-```
+The default experiment sorts records by the source Time field and partitions them chronologically:
 
-The 80/20 split yields:
-- Training: 227,845 transactions (391 fraud)
-- Test: 56,962 transactions (101 fraud)
+| Partition | Rows (fraction) | Role |
+|---|---:|---|
+| Training | 70% | Hyperparameter search, OOF base predictions and meta-learner fitting |
+| Validation | 15% | Select the operating threshold; no final test data is used |
+| Final test | 15% | One-time final performance evaluation |
 
----
+The chronological order is preserved when the source dataset is loaded. The validation and final test partitions are never included in hyperparameter fitting or SMOTE. The validation set selects an operating threshold; the same frozen threshold is then applied to the final test scores.
+
+A stratified-random split is available as a supplementary comparison, but it should not be used as the primary evidence for an online/forward-in-time detection claim.
 
 ## 4. Stacking Ensemble Architecture
 
@@ -258,8 +250,9 @@ Stacking (Wolpert, 1992) is a meta-learning technique where the predictions of b
 **XGBoost:**
 - Sequential gradient boosting with regularisation (L1 + L2)
 - `scale_pos_weight` adjusts loss weighting for minority class
-- Early stopping (`early_stopping_rounds=20`) prevents overfitting on eval set
-- Often the best single model on tabular fraud detection datasets
+- The estimator count and regularisation settings are selected by cross-validated average precision
+- Model-level parallelism is limited when CV jobs are parallelised to avoid CPU oversubscription
+- Often a strong single-model baseline on tabular fraud-detection datasets
 
 ### 4.3 Meta-Learner Design
 
@@ -312,8 +305,7 @@ A simple **Logistic Regression** meta-learner is used deliberately. With only 3 
 | scale_pos_weight | [1, 5, 10, 50, 100] | Class imbalance correction |
 | **n_iter** | **50** | Manual random search with early stopping eval |
 
-**Early stopping:**  
-XGBoost uses `early_stopping_rounds=20`. A 10% random subset of the training fold is used as an internal eval set. Training halts if AUPRC on the eval set does not improve for 20 consecutive rounds. This prevents overfitting and speeds up the search — average training time is reduced by ~35%.
+**Search protocol:** XGBoost is tuned through the same cross-validation interface as the other base learners. The implementation does not repeatedly reuse one globally held-out early-stopping set across hyperparameter trials. RandomizedSearchCV scores each candidate using average precision on its held-out CV folds and refits the selected pipeline on the development-training partition.
 
 ### 5.4 Scoring Objective
 
@@ -328,61 +320,38 @@ All base learner searches use `scoring='average_precision'` (AUPRC). This metric
 
 ### 6.1 Algorithm (Pseudocode)
 
-```
-Algorithm: Leakage-Free OOF Meta-Feature Generation
-─────────────────────────────────────────────────────
-Input:  X ∈ ℝⁿˣᵖ, y ∈ {0,1}ⁿ, base learners L = {ℓ₁, ..., ℓₗ}, K
-Output: meta_X ∈ ℝⁿˣˡ (OOF probabilities for each learner)
+    Input: training partition X, labels y, base pipelines L, K folds
+    Output: OOF meta-feature matrix with one probability column per learner
 
-1. meta_X ← zeros(n, |L|)
-2. cv ← StratifiedKFold(K, shuffle=True, random_state=seed)
-3. splits ← cv.split(X, y)
+    meta_X = zeros(n_rows, number_of_learners)
+    for each fold:
+        clone each complete base pipeline
+        fit clone on raw X_train_fold, y_train_fold
+            StandardScaler fits only on X_train_fold
+            SMOTE resamples only X_train_fold
+            classifier fits only on resampled training-fold data
+        predict probabilities from raw X_validation_fold
+        write probabilities into meta_X at validation indices
 
-4. Parallel for k = 1 to K:                         // joblib.Parallel
-   a. train_idx, val_idx ← splits[k]
-   b. X_tr ← X[train_idx],  y_tr ← y[train_idx]
-   c. X_val ← X[val_idx]
-   
-   d. scaler ← StandardScaler()
-   e. X_tr_sc ← scaler.fit_transform(X_tr)          // fit on train ONLY
-   f. X_val_sc ← scaler.transform(X_val)            // transform val
-   
-   g. smote ← SMOTE(sampling_strategy=0.15, seed)
-   h. X_tr_res, y_tr_res ← smote.fit_resample(X_tr_sc, y_tr)
-   
-   i. fold_probs ← zeros(|val_idx|, |L|)
-   j. For j, ℓ in enumerate(L):
-       ℓ_k ← clone(ℓ)                               // thread-safe copy
-       ℓ_k.fit(X_tr_res, y_tr_res)
-       fold_probs[:, j] ← ℓ_k.predict_proba(X_val_sc)[:, 1]
-   
-   k. return (k, fold_probs, val_idx)
-
-5. Assemble: meta_X[val_idx] ← fold_probs  for each k
-
-6. return meta_X
-```
+    fit the meta-learner on meta_X and original y
 
 ### 6.2 Parallelisation Strategy
 
-The fold loop is parallelised using `joblib.Parallel(n_jobs=-1, prefer='threads')`. Thread-based parallelism (rather than process-based) is used because:
-- Avoids the overhead of serialising large numpy arrays across processes
-- Each fold operates on disjoint subsets of X, y with no shared mutable state
-- Thread-safe deep-copying via `joblib.dumps/loads` ensures no cross-fold contamination
+The fold loop is parallelised with joblib.Parallel. Each fold receives independent estimator clones created with sklearn.base.clone. Base estimators use one internal CPU thread while CV controls outer parallelism; this avoids nested all-core parallelism and CPU oversubscription. The run configuration records the outer n_jobs setting.
 
-On a 4-core machine, this yields approximately 3.2× speedup vs. sequential fold processing.
+### 6.3 Validation and Test Meta-Features
 
-### 6.3 Test Meta-Features
+The fitted base pipelines accept raw engineered feature rows. Each pipeline applies its own fitted scaler and classifier; SMOTE is used during fitting only and is not applied during inference.
 
-For test set evaluation, base learners are retrained on the full training set (after SMOTE+scaling), and test meta-features are generated by a single forward pass:
+    meta_X_validation = stack([
+        learner.predict_proba(X_validation)[:, 1] for learner in fitted_learners
+    ])
 
-```
-meta_X_test = stack([ℓ.predict_proba(X_test_sc)[:, 1] for ℓ in L], axis=1)
-```
+    meta_X_test = stack([
+        learner.predict_proba(X_test)[:, 1] for learner in fitted_learners
+    ])
 
-This is distinct from averaging K fold models — using a single model trained on all available training data is standard practice in final evaluation to maximise training data utilisation.
-
----
+The meta-learner is trained only on OOF predictions from the training partition. The validation meta-features choose the operating threshold. The final test meta-features are evaluated only after the threshold has been frozen.
 
 ## 7. Evaluation Metrics — Mathematical Definitions
 
@@ -409,7 +378,7 @@ where:
   n indexes the threshold values from the precision_recall_curve
 ```
 
-**Interpretation:** AUPRC = 1.0 indicates a perfect classifier. Random classifier baseline = fraud rate = 0.0017. Our model achieves 0.903, representing a **529× improvement** over random.
+**Interpretation:** AUPRC = 1.0 indicates a perfect ranking. The random-ranking baseline is approximately the fraud prevalence in the evaluation partition. Report the measured AUPRC from the current metrics artifact; do not reuse the archived v2.0 number as current performance.
 
 ### 7.3 F1-Score
 
@@ -439,7 +408,7 @@ TPR = Recall = TP / (TP + FN)
 FPR = FP / (FP + TN)
 ```
 
-Measures the probability that a randomly selected fraud case is ranked higher than a randomly selected legitimate transaction. ROC-AUC = 0.9791 for this model.
+Measures the probability that a randomly selected fraud case is ranked higher than a randomly selected legitimate transaction. Report the ROC-AUC measured on the current untouched test partition.
 
 ---
 
@@ -462,7 +431,7 @@ f1_scores = 2 * precisions * recalls / (precisions + recalls + ε)
 τ* = thresholds[argmax(f1_scores[:-1])]
 ```
 
-For this dataset, τ* ≈ 0.38, reflecting the asymmetric cost structure: missing a fraud case (FN) is more costly than incorrectly flagging a legitimate transaction (FP), so the optimal operating point is shifted left of 0.5.
+The selected threshold is data-dependent and is written to metrics.json. Its value must be learned from the validation partition only; it should not be copied from the legacy report or selected against the final test partition.
 
 **Business threshold tuning:**  
 In deployment, the threshold can be adjusted to balance precision and recall based on the bank's cost structure:
@@ -475,15 +444,7 @@ In deployment, the threshold can be adjusted to balance precision and recall bas
 
 ### 9.1 Stability Analysis Protocol
 
-To ensure results are not an artefact of a particular train/test split, we run the full evaluation 5 times with different random seeds:
-
-```
-seeds = [42, 1042, 2042, 3042, 4042]
-for seed in seeds:
-    X_train, X_test = train_test_split(X, y, random_state=seed)
-    run full pipeline
-    record metrics
-```
+The runner includes a supplementary repeated-stratified-random-split robustness analysis. Each run uses a new random 80/20 split, fold-local preprocessing and OOF meta-features. These results quantify sensitivity to partition choice on the benchmark; they do not replace the primary chronological holdout.
 
 ### 9.2 Confidence Intervals
 
@@ -498,7 +459,7 @@ CI₉₅   = mean ± t_{0.025, n-1} × SE
 
 where t_{0.025, 4} ≈ 2.776 for n=5 runs.
 
-**Target for AUPRC:** mean ± std = 0.903 ± 0.004, CI₉₅ = [0.899, 0.907]
+**Reporting rule:** state the observed mean, standard deviation and interval from the generated stability_report.json. No target interval is treated as an observed result.
 
 ### 9.3 Interpretation
 
