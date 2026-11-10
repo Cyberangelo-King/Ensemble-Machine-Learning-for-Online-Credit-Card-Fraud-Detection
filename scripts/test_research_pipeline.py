@@ -17,6 +17,7 @@ from src.run_experiment import (  # noqa: E402
     CONFIG,
     _pipeline,
     _split_train_validation_test,
+    _get_supplementary_training_data,
     compute_metrics,
     generate_oof_meta_features,
     load_and_engineer_features,
@@ -82,6 +83,23 @@ def test_temporal_split_is_disjoint_and_keeps_order() -> None:
     assert X_train[:, 0].max() < X_valid[:, 0].min()
     assert X_valid[:, 0].max() < X_test[:, 0].min()
     assert all(np.unique(part).tolist() == [0, 1] for part in (y_train, y_valid, y_test))
+
+
+def test_supplementary_analyses_receive_training_partition_only() -> None:
+    X = pd.DataFrame({
+        "feature_a": np.arange(200, dtype=np.float32),
+        "feature_b": np.arange(200, dtype=np.float32) * 2,
+    })
+    X.attrs["ordered_by_time"] = True
+    y = pd.Series(np.tile([0, 1], 100), name="Class", dtype="int8")
+
+    X_train, y_train = _get_supplementary_training_data(X, y, dict(CONFIG))
+
+    assert len(X_train) == 140
+    assert len(y_train) == 140
+    assert X_train["feature_a"].max() == 139
+    assert X_train.attrs["ordered_by_time"] is True
+    assert set(y_train.unique()) == {0, 1}
 
 
 def test_temporal_split_requires_chronological_loader_marker() -> None:
