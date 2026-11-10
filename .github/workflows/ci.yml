@@ -47,7 +47,7 @@ jobs:
 
       # ── 8. pytest (unit + integration, no live server required) ─────────────
       - name: Run pytest
-        run: pytest scripts/test_backend.py -v --tb=short
+        run: pytest scripts/test_backend.py scripts/test_research_pipeline.py -v --tb=short
 
   lint:
     name: Lint
