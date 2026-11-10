@@ -17,7 +17,7 @@ Key Features
 - SMOTE applied strictly INSIDE each CV fold (leakage-free)
 - Parallelised OOF stacking via joblib.Parallel
 - Threshold optimisation: reports at both 0.5 and F1-optimal threshold
-- Statistical significance: mean ± std across stability runs with 95 % CI
+- Supplementary split sensitivity: mean ± std and descriptive t-based intervals
 - Ablation study: test 1, 2, and 3 base learners
 - Learning curves: AUPRC vs training-set size
 - SHAP summary + permutation importance
@@ -387,9 +387,12 @@ def _search_pipeline(
         "label": label,
         "param_grid": param_grid,
         "n_iter": n_iter,
-        "cv_splits": cv.n_splits,
-        "cv_shuffle": cv.shuffle,
-        "cv_random_state": cv.random_state,
+        "cv_type": type(cv).__name__,
+        "cv_splits": getattr(cv, "n_splits", None),
+        "cv_shuffle": getattr(cv, "shuffle", None),
+        "cv_random_state": getattr(cv, "random_state", None),
+        "cv_gap": getattr(cv, "gap", None),
+        "cv_test_size": getattr(cv, "test_size", None),
         "random_state": cfg["random_state"],
         "smote_sampling_strategy": cfg["smote_sampling_strategy"],
     }, sort_keys=True, default=str).encode("utf-8"))
