@@ -3,79 +3,54 @@
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Cyberangelo-King/Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection/ci.yml?label=CI&logo=github)](https://github.com/Cyberangelo-King/Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection/actions)
-[![AUPRC](https://img.shields.io/badge/AUPRC-0.903-orange)](RESULTS.md)
-[![F1](https://img.shields.io/badge/F1-0.881-red)](RESULTS.md)
 
-> **Release note:** Headline metrics shown here are the recorded benchmark snapshot. The hardened release now selects thresholds without using the test set; rerun the research experiment to regenerate current threshold-specific metrics.
+> **Research status (10 November 2026):** The headline scores in the legacy RESULTS.md report are an archived historical snapshot. They have not yet been regenerated with the corrected pipeline in this branch. Do not cite them as the current model's measured performance. Run the experiment to generate a fresh results/metrics.json before reporting benchmark scores.
 
-A **research-grade, production-oriented stacking ensemble** for real-time credit card fraud detection, achieving AUPRC 0.903 and MCC 0.884 on the Kaggle Credit Card Fraud dataset. The system combines Logistic Regression, Random Forest, and XGBoost base learners with a Logistic Regression meta-learner, using leakage-free SMOTE-inside-CV oversampling and full statistical validation across 5 stability runs.
+This repository explores a stacking ensemble for highly imbalanced credit-card transaction data. Logistic Regression, Random Forest and XGBoost form the base layer; a Logistic Regression meta-learner combines their out-of-fold predictions. It includes a Streamlit demonstration, a FastAPI inference API, evaluation utilities and reproducible experiment scripts.
 
----
-
-## Architecture Diagram
-
-```
-                   ┌─────────────────────────────────────────────────┐
-                   │           INPUT: Transaction Features            │
-                   │  V1–V28 (PCA) + Amount_log + Hour (engineered)  │
-                   └──────────────────────┬──────────────────────────┘
-                                          │
-                              StandardScaler (fit on train only)
-                                          │
-                              SMOTE (applied INSIDE each CV fold)
-                                          │
-              ┌───────────────────────────┼───────────────────────────┐
-              │                           │                           │
-              ▼                           ▼                           ▼
-   ┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-   │  BASE LEARNER 1 │        │  BASE LEARNER 2 │        │  BASE LEARNER 3 │
-   │ Logistic Regr.  │        │  Random Forest  │        │    XGBoost      │
-   │ C=best, saga    │        │  500 trees      │        │  early stopping │
-   └────────┬────────┘        └────────┬────────┘        └────────┬────────┘
-            │  P(fraud|x)              │  P(fraud|x)              │  P(fraud|x)
-            └───────────────────┬──────┘──────────────────────────┘
-                                │
-              OOF Meta-Features: [lr_prob, rf_prob, xgb_prob]
-                                │
-                     ┌──────────▼──────────┐
-                     │  META-LEARNER        │
-                     │  Logistic Regression │
-                     │  trained on OOF probs│
-                     └──────────┬──────────┘
-                                │
-                     ┌──────────▼──────────┐
-                     │  Threshold Opt.      │
-                     │  F1-maximising on    │
-                     │  validation set      │
-                     └──────────┬──────────┘
-                                │
-                     ┌──────────▼──────────┐
-                     │   OUTPUT: P(fraud)   │
-                     │   Binary prediction  │
-                     └─────────────────────┘
-
-   Layer 0: Base Learners  →  Layer 1: Meta-Learner  →  Calibrated Output
-```
+The project is a **research prototype**, not a production payment-control system. The public ULB dataset is historical and anonymised; synthetic demo data is used only to demonstrate the interface.
 
 ---
 
-## Results
+## Model architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                   KEY RESULTS SUMMARY                           │
-├──────────────┬─────────────────────────────────────────────────┤
-│  AUPRC       │  0.9030  (vs. XGBoost alone: 0.890)            │
-│  F1-Score    │  0.8810  (optimal threshold: ~0.38)             │
-│  MCC         │  0.8840  (near-perfect agreement)               │
-│  ROC-AUC     │  0.9791                                         │
-│  Precision   │  0.9012                                         │
-│  Recall      │  0.8621                                         │
-│  Latency     │  <2 ms per transaction (CPU)                    │
-└──────────────┴─────────────────────────────────────────────────┘
+Raw transaction features
+V1–V28 + Amount_log + elapsed Hours
+             |
+             +---------------------------------+
+             |                 |               |
+       Fold-safe pipeline  Fold-safe pipeline  Fold-safe pipeline
+       StandardScaler      StandardScaler      StandardScaler
+       SMOTE                SMOTE               SMOTE
+       Logistic Regression Random Forest       XGBoost
+             |                 |               |
+             +--------- Out-of-fold probabilities --------+
+                                      |
+                              Logistic Regression
+                                meta-learner
+                                      |
+                         validation-selected threshold
+                                      |
+                        fraud score + decision label
 ```
 
-See [RESULTS.md](RESULTS.md) for the full results including ablation study, stability analysis, and baseline comparisons.
+Scaling and SMOTE live inside each imbalanced-learn pipeline. During cross-validation, each fold fits them using that fold's training rows only. The final evaluation protocol separates chronological training, validation and test periods; validation selects the operating threshold and the final test period is reserved for one-time evaluation.
+
+---
+
+## Benchmark reporting status
+
+The historical tables in RESULTS.md are retained for traceability, not as current claims. The repository does not contain the original generated metrics artifact or a persisted test-prediction file, so those old values cannot be independently checked from the current checkout.
+
+A fresh run writes:
+- results/metrics.json — validation threshold, final test metrics and base-learner comparison
+- results/stacking_model.pkl — versioned model bundle with preprocessing pipelines
+- results/stability_report.json — supplementary repeated-random-split robustness results
+- results/ablation_results.csv — stacking ablation results
+- figures/ — ROC, PR, confusion matrix, reliability and learning-curve plots
+
+AUPRC is the primary metric for this highly imbalanced task. Accuracy alone is not an adequate success measure.
 
 ---
 
@@ -117,7 +92,7 @@ python src/run_experiment.py \
     --n-iter-xgb 50 \                   # XGBoost RandomizedSearch iterations
     --smote-ratio 0.15 \                # SMOTE minority:majority ratio
     --n-folds 5 \                       # StratifiedKFold folds
-    --n-stability-runs 5 \              # Stability analysis runs
+    --n-stability-runs 5 \\              # Supplementary stability runs\n    --split-strategy temporal \\       # temporal (default) or stratified_random
     --skip-ablation \                   # Optional: skip ablation study
     --skip-learning-curves              # Optional: skip learning curves
 ```
@@ -125,8 +100,8 @@ python src/run_experiment.py \
 **Outputs produced:**
 | Artefact | Path | Description |
 |---|---|---|
-| Model bundle | `results/stacking_model.pkl` | Full pipeline (scalers + all models) |
-| Metrics | `results/metrics.json` | JSON with all metrics at both thresholds |
+| Model bundle | `results/stacking_model.pkl` | Base learners with fold-safe preprocessing pipelines |
+| Metrics | `results/metrics.json` | Validation-selected threshold, untouched final test metrics and base learner results |
 | Stability | `results/stability_report.json` | Mean ± std across runs |
 | Ablation | `results/ablation_results.csv` | Per-configuration metrics |
 | ROC curve | `figures/roc_curve.png` | ROC with AUC annotation |
@@ -183,7 +158,7 @@ npm install && npm run dev
 | Fraud rate | 0.172% (highly imbalanced) |
 | Time span | 2 days of European cardholder transactions |
 | Features | V1–V28: PCA-anonymised components; Amount; Time |
-| Engineered | `Amount_log = log1p(Amount)`, `Hour = (Time % 86400) / 3600` |
+| Engineered | `Amount_log = log1p(Amount)`, `Hour = Time / 3600` (elapsed hours since first transaction) |
 | Labels | Class: 0 = legitimate, 1 = fraud |
 
 **Class imbalance handling:** SMOTE (Synthetic Minority Over-sampling Technique) is applied with `sampling_strategy=0.15` strictly **inside** each cross-validation fold to prevent data leakage. See [METHODOLOGY.md](METHODOLOGY.md) for a detailed explanation.
@@ -222,9 +197,9 @@ Ensemble-Machine-Learning-for-Online-Credit-Card-Fraud-Detection/
 │   ├── stability_report.json
 │   ├── ablation_results.csv
 │   └── checkpoints/
-│       ├── lr_best.pkl
-│       ├── rf_best.pkl
-│       └── xgb_best.pkl
+│       ├── lr_pipeline_v2_best.pkl
+│       ├── rf_pipeline_v2_best.pkl
+│       └── xgb_pipeline_v2_best.pkl
 │
 ├── figures/                       # (gitignored) Exported plots
 │   ├── roc_curve.png
@@ -261,7 +236,7 @@ Stacking (stacked generalisation) trains a **meta-learner** on the out-of-fold (
 
 | Learner | Strength | Weakness |
 |---|---|---|
-| Logistic Regression | Calibrated probabilities, fast | Assumes linearity |
+| Logistic Regression | Fast linear baseline with probability outputs | Assumes linear decision boundaries |
 | Random Forest | Robust, low variance, handles nonlinearity | Slower, less precise probability calibration |
 | XGBoost | Highest raw performance, handles interactions | Prone to overfitting without tuning |
 
@@ -349,7 +324,7 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 ---
 
-*Final Year Project — Federal University of Technology, Akure | Academic Year 2025–2026*
+*Research prototype — Cyberangelo-King | Revised 10 November 2026*
 
 
 ## Engineering and security notes
