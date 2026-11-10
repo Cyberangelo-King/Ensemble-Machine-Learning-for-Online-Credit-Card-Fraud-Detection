@@ -95,11 +95,41 @@ def sync_client():
         # mounted directly on a synchronous httpx.Client.
         try:
             from fastapi.testclient import TestClient
-            from dashboard.backend.main import app
+from fastapi import HTTPException
+            from dashboard.backend import main as backend_main
+from dashboard.backend.main import app
             with TestClient(app) as client:
                 yield client
         except ImportError as exc:
             pytest.skip(f"Could not import backend app: {exc}")
+
+
+# =============================================================================
+# Authentication helpers
+# =============================================================================
+
+class TestAuthentication:
+    def test_production_fails_closed_without_api_key(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "")
+        monkeypatch.setenv("APP_ENV", "production")
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key(None)
+        assert exc.value.status_code == 503
+
+    def test_configured_api_key_rejects_missing_or_wrong_value(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "test-secret")
+        monkeypatch.setenv("APP_ENV", "development")
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key(None)
+        assert exc.value.status_code == 401
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key("incorrect")
+        assert exc.value.status_code == 401
+
+    def test_configured_api_key_accepts_matching_value(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "test-secret")
+        monkeypatch.setenv("APP_ENV", "development")
+        backend_main._require_api_key("test-secret")
 
 
 # =============================================================================
