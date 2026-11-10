@@ -591,6 +591,7 @@ def _build_cross_validator(
     cfg: Dict[str, Any],
     split_strategy: str,
     seed: int,
+    reference_y: Optional[np.ndarray] = None,
 ) -> Any:
     """
     Use forward-chaining folds for temporal experiments.
@@ -607,6 +608,8 @@ def _build_cross_validator(
             if train_idx.max() >= valid_idx.min():
                 raise RuntimeError("Forward-chaining CV produced a non-chronological fold.")
             train_labels = y[train_idx]
+            if reference_y is not None:
+                train_labels = np.concatenate([reference_y, train_labels])
             valid_labels = y[valid_idx]
             positives = int(np.sum(train_labels == 1))
             if np.unique(train_labels).size != 2 or positives <= 5:
@@ -699,7 +702,9 @@ def _get_supplementary_training_data(
         ordered_by_time=ordered_by_time,
     )
     training_frame = pd.DataFrame(X_train, columns=list(X.columns))
-    training_frame.attrs["ordered_by_time"] = ordered_by_time
+    training_frame.attrs["ordered_by_time"] = (
+        ordered_by_time and cfg.get("split_strategy", "temporal") == "temporal"
+    )
     training_labels = pd.Series(y_train, name=y.name or "Class", dtype="int8")
     return training_frame, training_labels
 
@@ -759,6 +764,7 @@ def run_full_pipeline(
     )
     cv_stack = _build_cross_validator(
         y_stack, cfg, strategy, cfg["random_state"],
+        reference_y=y_tune if strategy == "temporal" else None,
     )
     learners = [
         _tune_logistic_regression(X_tune, y_tune, cv_tune, cfg, checkpoint_dir),
