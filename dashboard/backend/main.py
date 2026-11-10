@@ -184,6 +184,12 @@ def _require_model() -> None:
 
 
 def _require_api_key(provided_key: Optional[str]) -> None:
+    production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
+    if production_mode and not API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication is not configured. Set FRAUD_API_KEY before production startup.",
+        )
     if API_KEY and provided_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
@@ -435,6 +441,13 @@ async def explain(index: int) -> Dict[str, Any]:
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
     """Replay sample dashboard rows through /predict; this is not a live card-network feed."""
+    production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
+    if production_mode and not API_KEY:
+        await websocket.close(code=1011, reason="API authentication is not configured.")
+        return
+    if API_KEY and websocket.headers.get("x-api-key") != API_KEY:
+        await websocket.close(code=1008, reason="Invalid or missing API key.")
+        return
     await websocket.accept()
     logger.info("WebSocket client connected.")
     try:
