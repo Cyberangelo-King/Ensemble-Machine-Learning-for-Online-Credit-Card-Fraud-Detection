@@ -145,6 +145,8 @@ async def lifespan(app: FastAPI):
 ALLOWED_ORIGINS: List[str] = [x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").split(",") if x.strip()]
 API_KEY = os.environ.get("FRAUD_API_KEY", "").strip()
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "120"))
+MAX_WS_CONNECTIONS_PER_IP = int(os.environ.get("MAX_WS_CONNECTIONS_PER_IP", "3"))
+_ws_connections: Dict[str, int] = {}
 MODEL_SHA256 = os.environ.get("MODEL_SHA256", "").strip().lower()
 _rate_buckets: Dict[str, List[float]] = {}
 
@@ -461,6 +463,17 @@ async def websocket_stream(websocket: WebSocket) -> None:
     The client controls start/stop and replay interval using JSON messages.
     This endpoint is not connected to a live payment network or event feed.
     """
+    origin = websocket.headers.get("origin")
+    if origin and ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008, reason="Origin is not allowed.")
+        return
+
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    active_connections = _ws_connections.get(client_ip, 0)
+    if active_connections >= MAX_WS_CONNECTIONS_PER_IP:
+        await websocket.close(code=1013, reason="Too many replay connections.")
+        return
+
     production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
     if production_mode and not API_KEY:
         await websocket.close(code=1011, reason="API authentication is not configured.")
@@ -470,6 +483,7 @@ async def websocket_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1008, reason="Invalid or missing API key.")
         return
 
+    _ws_connections[client_ip] = active_connections + 1
     await websocket.accept()
     logger.info("WebSocket sample replay client connected.")
     running = False
@@ -554,3 +568,9 @@ async def websocket_stream(websocket: WebSocket) -> None:
         logger.info("WebSocket sample replay client disconnected.")
     except Exception:
         logger.exception("WebSocket sample replay crashed.")
+    finally:
+        remaining = _ws_connections.get(client_ip, 1) - 1
+        if remaining > 0:
+            _ws_connections[client_ip] = remaining
+        else:
+            _ws_connections.pop(client_ip, None)
