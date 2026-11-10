@@ -40,6 +40,7 @@ python src/run_experiment.py --data-path data/creditcard.csv --output-dir result
 import argparse
 import hashlib
 import json
+from importlib.metadata import PackageNotFoundError, version as package_version
 import logging
 import os
 import pickle
@@ -196,6 +197,34 @@ def _log_step(msg: str) -> None:
 # DATA LOADING & FEATURE ENGINEERING
 # ===========================================================================
 
+def _sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a dataset file incrementally so large CSVs are never loaded into memory twice."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _runtime_versions() -> Dict[str, str]:
+    """Capture package versions needed to interpret and reproduce an experiment."""
+    packages = {
+        "numpy": "numpy",
+        "pandas": "pandas",
+        "scikit_learn": "scikit-learn",
+        "imbalanced_learn": "imbalanced-learn",
+        "xgboost": "xgboost",
+        "joblib": "joblib",
+    }
+    versions: Dict[str, str] = {"python": sys.version.split()[0]}
+    for key, distribution in packages.items():
+        try:
+            versions[key] = package_version(distribution)
+        except PackageNotFoundError:
+            versions[key] = "not-installed"
+    return versions
+
+
 def load_and_engineer_features(data_path: str) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Load the ULB credit-card dataset and engineer a chronological feature table.
@@ -233,6 +262,9 @@ def load_and_engineer_features(data_path: str) -> Tuple[pd.DataFrame, pd.Series]
     X = df[feature_cols].copy()
     y = df["Class"].astype("int8")
     X.attrs["ordered_by_time"] = True
+    X.attrs["dataset_sha256"] = _sha256_file(data_path)
+    X.attrs["dataset_file_name"] = Path(data_path).name
+    X.attrs["dataset_rows"] = int(len(df))
 
     _log_step(
         f"Loaded {len(df):,} chronological rows in {time.perf_counter()-started:.2f}s; "
@@ -708,6 +740,9 @@ def _get_supplementary_training_data(
     training_frame.attrs["ordered_by_time"] = (
         ordered_by_time and cfg.get("split_strategy", "temporal") == "temporal"
     )
+    for key in ("dataset_sha256", "dataset_file_name", "dataset_rows"):
+        if key in X.attrs:
+            training_frame.attrs[key] = X.attrs[key]
     training_labels = pd.Series(y_train, name=y.name or "Class", dtype="int8")
     return training_frame, training_labels
 
@@ -851,12 +886,21 @@ def run_full_pipeline(
         "training_provenance": {
             "dataset": "Kaggle ULB Credit Card Fraud Detection",
             "split_strategy": strategy,
+            "dataset_file_name": X.attrs.get("dataset_file_name"),
+            "dataset_sha256": X.attrs.get("dataset_sha256"),
             "training_rows": int(len(y_train)),
+            "training_fraud_rows": int(np.sum(y_train)),
+            "training_fraud_prevalence": float(np.mean(y_train)),
             "base_hyperparameter_tuning_rows": int(len(y_tune)),
             "meta_stack_pool_rows": int(len(y_stack)),
             "meta_oof_rows": int(len(meta_oof_indices)),
+            "meta_warmup_excluded_rows": int(len(y_stack) - len(meta_oof_indices)),
             "validation_rows": int(len(y_valid)),
+            "validation_fraud_rows": int(np.sum(y_valid)),
+            "validation_fraud_prevalence": float(np.mean(y_valid)),
             "test_rows": int(len(y_test)),
+            "test_fraud_rows": int(np.sum(y_test)),
+            "test_fraud_prevalence": float(np.mean(y_test)),
             "threshold_selected_on": "validation partition",
             "test_set_used_for_threshold_selection": False,
             "hyperparameter_tuning_rows_disjoint_from_oof_meta_rows": True,
@@ -864,6 +908,8 @@ def run_full_pipeline(
         },
         "evaluation_protocol": {
             "threshold_selected_on": "held-out validation partition",
+            "cross_validation_strategy": "expanding_window_time_series" if strategy == "temporal" else "stratified_kfold",
+            "meta_oof_warmup_rows_excluded": int(len(y_stack) - len(meta_oof_indices)),
             "test_set_used_for_threshold_selection": False,
             "temporal_validation": strategy == "temporal",
             "inner_cross_validation": "expanding_window_time_series" if strategy == "temporal" else "stratified_kfold",
@@ -896,11 +942,29 @@ def run_full_pipeline(
             "selection_data": "held-out validation partition",
             "test_set_used": False,
         },
+        "dataset_provenance": {
+            "file_name": X.attrs.get("dataset_file_name"),
+            "sha256": X.attrs.get("dataset_sha256"),
+            "rows": int(len(y_array)),
+            "fraud_rows": int(np.sum(y_array)),
+            "fraud_prevalence": float(np.mean(y_array)),
+        },
+        "environment": _runtime_versions(),
+        "git_commit_sha": os.environ.get("GITHUB_SHA") or os.environ.get("GIT_COMMIT_SHA"),
         "split_protocol": {
             "strategy": strategy,
             "train_fraction": 0.70,
             "validation_fraction": 0.15,
             "test_fraction": 0.15,
+            "training_rows": int(len(y_train)),
+            "training_fraud_rows": int(np.sum(y_train)),
+            "training_fraud_prevalence": float(np.mean(y_train)),
+            "validation_rows": int(len(y_valid)),
+            "validation_fraud_rows": int(np.sum(y_valid)),
+            "validation_fraud_prevalence": float(np.mean(y_valid)),
+            "test_rows": int(len(y_test)),
+            "test_fraud_rows": int(np.sum(y_test)),
+            "test_fraud_prevalence": float(np.mean(y_test)),
             "test_partition_used_for": "one-time final evaluation only",
             "temporal_training_protocol": "chronological tune prefix, forward-chaining CV and later OOF stack rows" if strategy == "temporal" else "stratified-random development protocol",
         },
