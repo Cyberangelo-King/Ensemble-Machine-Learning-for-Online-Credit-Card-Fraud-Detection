@@ -55,14 +55,13 @@ The default research evaluation is chronological:
 
 Inside the training partition:
 
-- A separate tuning subset selects base-model hyperparameters using training-only cross-validation and average precision.
-- A disjoint stacking subset receives out-of-fold predictions. The tuning subset may be included in each fold's training data, but its labels are not part of the OOF rows used to fit the meta-learner.
-- The meta-learner is fit on the OOF stacking rows.
+- Base hyperparameters are tuned using a separate early chronological prefix and expanding-window TimeSeriesSplit.
+- A later stacking subset receives forward-chaining out-of-fold predictions. Each fold is trained only on the earlier tuning prefix plus earlier stack rows; no future stack observations are used to predict the current validation block.
+- The initial stack warm-up rows that do not have a prior training window are excluded from fitting the meta-learner.
+- The meta-learner is fit only on genuine OOF predictions.
 - The selected base pipelines are then refit on the complete training partition.
-- The operating threshold is selected on validation data and frozen before final test evaluation.
+- Stability, ablation and learning-curve analyses are restricted to the primary training partition; validation and final-test rows are not reused.
 
-The runner also supports a stratified-random split for supplementary comparisons. It must not be substituted for the default chronological evaluation when making forward-in-time claims.
-Stability, ablation and learning-curve analyses are restricted to the primary training partition only; validation and final-test rows are not reused by those supplementary analyses.
 
 ## 5. Metrics and interpretation
 
