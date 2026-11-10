@@ -43,6 +43,9 @@ def test_feature_engineering_uses_elapsed_hours_and_sorts_time(tmp_path: Path) -
     assert len(features) == rows
     assert len(labels) == rows
     assert np.all(np.diff(features["Hour"].to_numpy()) >= 0)
+    assert len(features.attrs["dataset_sha256"]) == 64
+    assert features.attrs["dataset_file_name"] == "creditcard.csv"
+    assert features.attrs["dataset_rows"] == rows
     np.testing.assert_allclose(
         features["Hour"].to_numpy(),
         np.arange(rows, dtype=np.float32),
