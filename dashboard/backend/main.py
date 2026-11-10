@@ -539,7 +539,12 @@ async def websocket_stream(websocket: WebSocket) -> None:
                         "risk_level": risk_level,
                         "latency_ms": float(latency_ms),
                         "model_version": str(state.model.get("model_version", "unknown")),
-                        "data_source": "synthetic_demo" if not os.path.exists(DATA_PATH) else "local_dataset_replay",
+                        "data_source": "synthetic_dashboard_data" if not os.path.exists(DATA_PATH) else "local_csv_replay",
+                        "model_training_source": (
+                            "synthetic_demo"
+                            if "synthetic" in str(state.model.get("training_note", "")).lower()
+                            else "research_or_external_dataset"
+                        ),
                     }
                     await websocket.send_json(payload)
                 except Exception:
