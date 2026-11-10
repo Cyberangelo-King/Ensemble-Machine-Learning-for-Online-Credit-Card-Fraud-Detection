@@ -25,6 +25,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from fastapi import HTTPException
+from starlette.websockets import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -302,6 +303,15 @@ class TestExplain:
 # =============================================================================
 
 class TestWebSocketDemoReplay:
+    def test_websocket_rejects_unapproved_browser_origin(self, sync_client, monkeypatch):
+        monkeypatch.setattr(backend_main, "ALLOWED_ORIGINS", ["https://trusted.example"])
+        with pytest.raises(WebSocketDisconnect):
+            with sync_client.websocket_connect(
+                "/ws/stream",
+                headers={"origin": "https://untrusted.example"},
+            ):
+                pass
+
     def test_start_message_returns_frontend_compatible_sample(self, sync_client, monkeypatch):
         """The React replay contract receives every field it renders."""
         rows = 20
@@ -317,13 +327,16 @@ class TestWebSocketDemoReplay:
         })
         monkeypatch.setattr(backend_main.state, "data", sample)
         monkeypatch.setattr(backend_main, "API_KEY", "")
+        monkeypatch.setattr(backend_main, "ALLOWED_ORIGINS", ["https://trusted.example"])
         monkeypatch.setattr(
             backend_main,
             "_predict_raw",
             lambda frame: (np.array([0.85]), np.array([1])),
         )
 
-        with sync_client.websocket_connect("/ws/stream") as socket:
+        with sync_client.websocket_connect(
+            "/ws/stream", headers={"origin": "https://trusted.example"}
+        ) as socket:
             socket.send_json({"action": "start", "interval": 0.1})
             message = socket.receive_json()
             assert message["index"] >= 0
