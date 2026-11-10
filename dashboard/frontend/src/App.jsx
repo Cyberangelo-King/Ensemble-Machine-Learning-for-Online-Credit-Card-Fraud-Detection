@@ -119,7 +119,7 @@ const App = () => {
           </div>
           <div>
             <h1 className="text-xl font-black tracking-tight">FraudGuard AI</h1>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Real-time Stacking Ensemble Monitoring</p>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Research Model · Simulated Transaction Stream</p>
           </div>
         </div>
 
