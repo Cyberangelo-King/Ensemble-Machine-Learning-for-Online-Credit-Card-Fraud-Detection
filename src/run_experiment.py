@@ -61,9 +61,11 @@ import pandas as pd
 import psutil
 import shap
 from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
 from joblib import Memory, Parallel, delayed
 from scipy import stats
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import calibration_curve
+from sklearn.base import clone
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -120,7 +122,8 @@ CONFIG: Dict[str, Any] = {
     "n_iter_rf": 30,
     "n_iter_xgb": 50,
     # ── Parallelism ──────────────────────────────────────────────────────────
-    "n_jobs": -1,
+    "n_jobs": -1,  # CV-level parallelism; individual estimators use one thread
+    "split_strategy": "temporal",
     # ── XGBoost early stopping ───────────────────────────────────────────────
     "xgb_early_stopping_rounds": 20,
     "xgb_eval_fraction": 0.1,         # fraction of train fold used as eval set
@@ -195,51 +198,45 @@ def _log_step(msg: str) -> None:
 
 def load_and_engineer_features(data_path: str) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Load creditcard.csv with dtype optimisation and apply feature engineering.
+    Load the ULB credit-card dataset and engineer a chronological feature table.
 
-    Optimisations
-    -------------
-    - V1–V28 loaded as float32 (halves memory vs float64)
-    - Amount and Time loaded as float32
-    - Engineered features:
-        Amount_log = log1p(Amount)   — compresses right-skewed distribution
-        Hour       = (Time % 86400) / 3600  — captures intra-day fraud patterns
-
-    Parameters
-    ----------
-    data_path : str
-        Path to creditcard.csv.
-
-    Returns
-    -------
-    X : pd.DataFrame  Feature matrix (284 807 × 32)
-    y : pd.Series     Binary labels (0 = legitimate, 1 = fraud)
+    The source dataset's Time column is elapsed seconds from the first
+    transaction.  It is therefore converted to elapsed hours (0–~48), not
+    interpreted as a wall-clock hour.  Rows are sorted by Time so the default
+    train/validation/test protocol is chronological.
     """
     _log_step(f"Loading data from '{data_path}'")
-    t0 = time.perf_counter()
+    started = time.perf_counter()
 
-    # Dtype map: float32 for all feature columns to halve memory
     dtype_map: Dict[str, str] = {f"V{i}": "float32" for i in range(1, 29)}
-    dtype_map["Amount"] = "float32"
-    dtype_map["Time"] = "float32"
-
+    dtype_map.update({"Amount": "float32", "Time": "float32"})
     df = pd.read_csv(data_path, dtype=dtype_map)
-    _log_step(f"Loaded {len(df):,} rows in {time.perf_counter()-t0:.2f}s")
 
-    # ── Feature engineering ───────────────────────────────────────────────
+    required = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time", "Class"]
+    missing = [name for name in required if name not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing required columns: {missing}")
+    if df[required].isna().any().any():
+        raise ValueError("Dataset contains missing values in required columns.")
+    if not set(df["Class"].unique()).issubset({0, 1}) or df["Class"].nunique() != 2:
+        raise ValueError("Class must contain both binary labels 0 and 1.")
+    if (df["Amount"] < 0).any() or (df["Time"] < 0).any():
+        raise ValueError("Amount and Time must be non-negative.")
+
+    df = df.sort_values("Time", kind="mergesort").reset_index(drop=True)
     df["Amount_log"] = np.log1p(df["Amount"]).astype("float32")
-    df["Hour"] = ((df["Time"] % 86400) / 3600).astype("float32")
+    df["Hour"] = (df["Time"] / 3600.0).astype("float32")
 
     feature_cols = [f"V{i}" for i in range(1, 29)] + ["Amount_log", "Hour"]
     X = df[feature_cols].copy()
-    y = df["Class"].astype(int)
+    y = df["Class"].astype("int8")
+    X.attrs["ordered_by_time"] = True
 
-    fraud_pct = y.mean() * 100
     _log_step(
-        f"Feature matrix: {X.shape} | Fraud: {y.sum():,} / {len(y):,} ({fraud_pct:.4f}%)"
+        f"Loaded {len(df):,} chronological rows in {time.perf_counter()-started:.2f}s; "
+        f"features={X.shape}; fraud={int(y.sum()):,} ({y.mean():.4%})"
     )
     return X, y
-
 
 # ===========================================================================
 # PREPROCESSING
@@ -253,34 +250,21 @@ def preprocess(
     random_state: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Scale features and apply SMOTE *inside* the fold to prevent data leakage.
+    Legacy preprocessing helper retained for notebook compatibility.
 
-    The scaler is fitted on X_train only, then applied to both X_train and
-    X_test — ensuring no information from the test fold contaminates scaling.
-    SMOTE is applied only to the already-scaled training data.
-
-    Parameters
-    ----------
-    X_train      : Training features (unscaled)
-    X_test       : Test/validation features (unscaled)
-    y_train      : Training labels
-    smote_ratio  : SMOTE sampling_strategy (target minority:majority ratio)
-    random_state : Seed for reproducibility
-
-    Returns
-    -------
-    X_train_res : SMOTE-resampled training features (scaled)
-    X_test_sc   : Scaled test features
-    y_train_res : SMOTE-resampled training labels
+    New experiments must use an imbalanced-learn Pipeline so scaling and
+    resampling are fitted independently inside every cross-validation fold.
     """
     scaler = StandardScaler()
-    X_train_sc = scaler.fit_transform(X_train)
-    X_test_sc = scaler.transform(X_test)
-
-    smote = SMOTE(sampling_strategy=smote_ratio, random_state=random_state, n_jobs=1)
-    X_train_res, y_train_res = smote.fit_resample(X_train_sc, y_train)
-    return X_train_res, X_test_sc, y_train_res
-
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    sampler = SMOTE(
+        sampling_strategy=smote_ratio,
+        random_state=random_state,
+        k_neighbors=min(5, max(1, int(np.sum(y_train)) - 1)),
+    )
+    X_resampled, y_resampled = sampler.fit_resample(X_train_scaled, y_train)
+    return X_resampled, X_test_scaled, y_resampled
 
 # ===========================================================================
 # METRICS
@@ -321,7 +305,7 @@ def compute_metrics(
     mcc = matthews_corrcoef(y_true, y_pred)
     precision = precision_score(y_true, y_pred, zero_division=0)
     recall = recall_score(y_true, y_pred, zero_division=0)
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
     return {
         "AUPRC": auprc,
         "ROC_AUC": roc_auc,
@@ -369,42 +353,78 @@ def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 # BASE-LEARNER TUNING  (with checkpointing)
 # ===========================================================================
 
+def _pipeline(estimator: Any, cfg: Dict[str, Any], random_state: int) -> ImbPipeline:
+    """Build a fold-safe preprocessing + sampling + classifier pipeline."""
+    positives = int(np.sum(np.asarray(cfg.get("_fit_labels", [])) == 1))
+    k_neighbors = min(5, max(1, positives - 1)) if positives else 5
+    return ImbPipeline(steps=[
+        ("scaler", StandardScaler()),
+        ("smote", SMOTE(
+            sampling_strategy=cfg["smote_sampling_strategy"],
+            random_state=random_state,
+            k_neighbors=k_neighbors,
+        )),
+        ("classifier", estimator),
+    ])
+
+
+def _search_pipeline(
+    pipeline: ImbPipeline,
+    param_grid: Dict[str, Any],
+    X: np.ndarray,
+    y: np.ndarray,
+    cv: StratifiedKFold,
+    n_iter: int,
+    cfg: Dict[str, Any],
+    checkpoint_path: Path,
+    label: str,
+) -> ImbPipeline:
+    """Tune a complete pipeline using training-only cross-validation."""
+    if checkpoint_path.exists():
+        LOG.info("Checkpoint found — loading %s pipeline.", label)
+        cached = joblib.load(checkpoint_path)
+        if not isinstance(cached, ImbPipeline):
+            raise RuntimeError(f"Invalid {label} checkpoint: expected an imbalanced-learn Pipeline.")
+        return cached
+
+    _log_step(f"Tuning {label} pipeline with fold-local scaling and SMOTE …")
+    search = RandomizedSearchCV(
+        estimator=pipeline,
+        param_distributions=param_grid,
+        n_iter=n_iter,
+        scoring="average_precision",
+        cv=cv,
+        n_jobs=cfg["n_jobs"],
+        pre_dispatch="2*n_jobs",
+        random_state=cfg["random_state"],
+        refit=True,
+        error_score="raise",
+        return_train_score=False,
+    )
+    search.fit(X, y)
+    LOG.info(
+        "Best %s parameters: %s | CV AUPRC: %.5f",
+        label, search.best_params_, search.best_score_,
+    )
+    joblib.dump(search.best_estimator_, checkpoint_path)
+    _log_step(f"{label} pipeline checkpoint saved → {checkpoint_path}")
+    return search.best_estimator_
+
+
 def _tune_logistic_regression(
     X: np.ndarray,
     y: np.ndarray,
     cv: StratifiedKFold,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
-) -> LogisticRegression:
-    """Tune Logistic Regression with RandomizedSearchCV."""
-    ckpt = checkpoint_dir / "lr_best.pkl"
-    if ckpt.exists():
-        LOG.info("Checkpoint found — loading LR model from disk.")
-        return joblib.load(ckpt)
-
-    _log_step("Tuning Logistic Regression …")
-    base = LogisticRegression(random_state=cfg["random_state"])
-    search = RandomizedSearchCV(
-        estimator=base,
-        param_distributions=cfg["lr_param_grid"],
-        n_iter=cfg["n_iter_lr"],
-        cv=cv,
-        scoring="average_precision",
-        n_jobs=cfg["n_jobs"],
-        pre_dispatch="2*n_jobs",
-        random_state=cfg["random_state"],
-        verbose=0,
-        refit=True,
+) -> ImbPipeline:
+    model = LogisticRegression(random_state=cfg["random_state"], n_jobs=1)
+    pipeline = _pipeline(model, cfg, cfg["random_state"])
+    grid = {f"classifier__{key}": value for key, value in cfg["lr_param_grid"].items()}
+    return _search_pipeline(
+        pipeline, grid, X, y, cv, cfg["n_iter_lr"], cfg,
+        checkpoint_dir / "lr_best.pkl", "Logistic Regression",
     )
-    with tqdm(total=cfg["n_iter_lr"], desc="LR RandomSearch", unit="cfg") as pbar:
-        search.fit(X, y)
-        pbar.update(cfg["n_iter_lr"])
-
-    best = search.best_estimator_
-    LOG.info(f"Best LR params: {search.best_params_} | CV AUPRC: {search.best_score_:.4f}")
-    joblib.dump(best, ckpt)
-    _log_step(f"LR checkpoint saved → {ckpt}")
-    return best
 
 
 def _tune_random_forest(
@@ -413,39 +433,16 @@ def _tune_random_forest(
     cv: StratifiedKFold,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
-) -> RandomForestClassifier:
-    """Tune Random Forest with RandomizedSearchCV."""
-    ckpt = checkpoint_dir / "rf_best.pkl"
-    if ckpt.exists():
-        LOG.info("Checkpoint found — loading RF model from disk.")
-        return joblib.load(ckpt)
-
-    _log_step("Tuning Random Forest …")
-    base = RandomForestClassifier(
-        random_state=cfg["random_state"],
-        n_jobs=cfg["n_jobs"],
+) -> ImbPipeline:
+    model = RandomForestClassifier(
+        random_state=cfg["random_state"], n_jobs=1,
     )
-    search = RandomizedSearchCV(
-        estimator=base,
-        param_distributions=cfg["rf_param_grid"],
-        n_iter=cfg["n_iter_rf"],
-        cv=cv,
-        scoring="average_precision",
-        n_jobs=cfg["n_jobs"],
-        pre_dispatch="2*n_jobs",
-        random_state=cfg["random_state"],
-        verbose=0,
-        refit=True,
+    pipeline = _pipeline(model, cfg, cfg["random_state"])
+    grid = {f"classifier__{key}": value for key, value in cfg["rf_param_grid"].items()}
+    return _search_pipeline(
+        pipeline, grid, X, y, cv, cfg["n_iter_rf"], cfg,
+        checkpoint_dir / "rf_best.pkl", "Random Forest",
     )
-    with tqdm(total=cfg["n_iter_rf"], desc="RF RandomSearch", unit="cfg") as pbar:
-        search.fit(X, y)
-        pbar.update(cfg["n_iter_rf"])
-
-    best = search.best_estimator_
-    LOG.info(f"Best RF params: {search.best_params_} | CV AUPRC: {search.best_score_:.4f}")
-    joblib.dump(best, ckpt)
-    _log_step(f"RF checkpoint saved → {ckpt}")
-    return best
 
 
 def _tune_xgboost(
@@ -454,79 +451,28 @@ def _tune_xgboost(
     cv: StratifiedKFold,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
-) -> XGBClassifier:
-    """Tune XGBoost with RandomizedSearchCV and early stopping."""
-    ckpt = checkpoint_dir / "xgb_best.pkl"
-    if ckpt.exists():
-        LOG.info("Checkpoint found — loading XGB model from disk.")
-        return joblib.load(ckpt)
+) -> ImbPipeline:
+    """
+    Tune XGBoost using the same fold-local preprocessing/resampling protocol.
 
-    _log_step("Tuning XGBoost …")
-    # Split a small eval set from training data for early stopping
-    from sklearn.model_selection import train_test_split
-    eval_frac = cfg["xgb_eval_fraction"]
-    X_tr, X_eval, y_tr, y_eval = train_test_split(
-        X, y,
-        test_size=eval_frac,
-        stratify=y,
+    Early stopping is deliberately not passed a globally reused eval_set:
+    ordinary CV scoring selects hyperparameters without contaminating a
+    repeated holdout, and the selected pipeline is refitted on the full
+    development-training partition by RandomizedSearchCV(refit=True).
+    """
+    model = XGBClassifier(
         random_state=cfg["random_state"],
-    )
-
-    base = XGBClassifier(
-        random_state=cfg["random_state"],
-        n_jobs=cfg["n_jobs"],
-        use_label_encoder=False,
-        eval_metric="aucpr",
-        early_stopping_rounds=cfg["xgb_early_stopping_rounds"],
-        verbosity=0,
-    )
-
-    # For RandomizedSearchCV we cannot pass eval_set through fit_params reliably
-    # across all sklearn versions. We do a manual random search here.
-    rng = np.random.default_rng(cfg["random_state"])
-    grid = cfg["xgb_param_grid"]
-    n_iter = cfg["n_iter_xgb"]
-
-    best_score = -np.inf
-    best_params: Dict[str, Any] = {}
-    best_estimator: Optional[XGBClassifier] = None
-
-    for _ in tqdm(range(n_iter), desc="XGB RandomSearch", unit="cfg"):
-        params = {k: rng.choice(v).item() if isinstance(v[0], (int, float)) else rng.choice(v)
-                  for k, v in grid.items()}
-        clf = XGBClassifier(
-            **params,
-            random_state=cfg["random_state"],
-            n_jobs=cfg["n_jobs"],
-            use_label_encoder=False,
-            eval_metric="aucpr",
-            early_stopping_rounds=cfg["xgb_early_stopping_rounds"],
-            verbosity=0,
-        )
-        clf.fit(X_tr, y_tr, eval_set=[(X_eval, y_eval)], verbose=False)
-        score = average_precision_score(y_eval, clf.predict_proba(X_eval)[:, 1])
-        if score > best_score:
-            best_score = score
-            best_params = params
-            best_estimator = clf
-
-    assert best_estimator is not None
-    LOG.info(f"Best XGB params: {best_params} | Eval AUPRC: {best_score:.4f}")
-
-    # Refit on full data without early stopping for the final model
-    final_xgb = XGBClassifier(
-        **best_params,
-        random_state=cfg["random_state"],
-        n_jobs=cfg["n_jobs"],
-        use_label_encoder=False,
+        n_jobs=1,  # parallelism is owned by RandomizedSearchCV
         eval_metric="aucpr",
         verbosity=0,
+        tree_method="hist",
     )
-    final_xgb.fit(X, y)
-    joblib.dump(final_xgb, ckpt)
-    _log_step(f"XGB checkpoint saved → {ckpt}")
-    return final_xgb
-
+    pipeline = _pipeline(model, cfg, cfg["random_state"])
+    grid = {f"classifier__{key}": value for key, value in cfg["xgb_param_grid"].items()}
+    return _search_pipeline(
+        pipeline, grid, X, y, cv, cfg["n_iter_xgb"], cfg,
+        checkpoint_dir / "xgb_best.pkl", "XGBoost",
+    )
 
 # ===========================================================================
 # OOF STACKING
@@ -542,27 +488,15 @@ def _fit_fold(
     smote_ratio: float,
     random_state: int,
 ) -> Tuple[int, np.ndarray, np.ndarray]:
-    """
-    Fit all base learners on one fold and return their OOF predictions.
-
-    Runs inside a joblib.Parallel call for maximum speed.
-
-    Returns
-    -------
-    fold_idx     : int
-    oof_probs    : np.ndarray of shape (n_val, n_base_learners)
-    val_idx      : np.ndarray — returned so the caller can reconstruct order
-    """
-    X_tr, y_tr = X[train_idx], y[train_idx]
-    X_val = X[val_idx]
-
-    X_tr_res, X_val_sc, y_tr_res = preprocess(X_tr, X_val, y_tr, smote_ratio, random_state)
-
+    """Fit cloned fold-safe pipelines and return held-out probabilities."""
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_valid = X[val_idx]
     fold_probs = np.zeros((len(val_idx), len(base_learners)), dtype=np.float32)
-    for j, clf in enumerate(base_learners):
-        clf_clone = joblib.loads(joblib.dumps(clf))  # thread-safe deep copy
-        clf_clone.fit(X_tr_res, y_tr_res)
-        fold_probs[:, j] = clf_clone.predict_proba(X_val_sc)[:, 1]
+
+    for column, estimator in enumerate(base_learners):
+        fitted = clone(estimator)
+        fitted.fit(X_train, y_train)
+        fold_probs[:, column] = fitted.predict_proba(X_valid)[:, 1]
 
     return fold_idx, fold_probs, val_idx
 
@@ -578,57 +512,83 @@ def generate_oof_meta_features(
     desc: str = "OOF Stacking",
 ) -> np.ndarray:
     """
-    Generate Out-of-Fold meta-features via parallelised k-fold stacking.
+    Build leakage-controlled out-of-fold meta-features.
 
-    Algorithm
-    ---------
-    1. Split data into K folds using StratifiedKFold.
-    2. For each fold k in parallel:
-        a. Apply SMOTE+scaling strictly to training folds only.
-        b. Fit each base learner on the SMOTE-augmented fold.
-        c. Predict probabilities for the held-out fold.
-    3. Assemble predictions into an (n_samples, n_base_learners) matrix.
-    4. This matrix becomes the training set for the meta-learner.
-
-    Parameters
-    ----------
-    X             : Feature matrix
-    y             : Labels
-    base_learners : List of fitted (but to-be-refit) base learner objects
-    cv            : StratifiedKFold splitter
-    smote_ratio   : SMOTE sampling strategy
-    n_jobs        : Parallelism level
-    random_state  : Seed
-    desc          : Progress-bar description
-
-    Returns
-    -------
-    meta_X : np.ndarray of shape (n_samples, n_learners)
+    Every cloned base learner owns its scaler and SMOTE sampler.  Consequently,
+    both are fitted only on that fold's training partition; validation rows
+    are never transformed using statistics or synthetic neighbours learned
+    from the validation fold.
     """
     splits = list(cv.split(X, y))
     _log_step(f"Generating OOF meta-features across {len(splits)} folds …")
-
     results = Parallel(n_jobs=n_jobs, prefer="threads")(
         delayed(_fit_fold)(
-            fold_idx, train_idx, val_idx,
-            X, y, base_learners, smote_ratio, random_state,
+            fold_idx, train_idx, valid_idx, X, y, base_learners,
+            smote_ratio, random_state,
         )
-        for fold_idx, (train_idx, val_idx) in enumerate(
+        for fold_idx, (train_idx, valid_idx) in enumerate(
             tqdm(splits, desc=desc, unit="fold")
         )
     )
 
-    meta_X = np.zeros((len(y), len(base_learners)), dtype=np.float32)
-    for fold_idx, fold_probs, val_idx in results:
-        meta_X[val_idx] = fold_probs
+    meta_features = np.zeros((len(y), len(base_learners)), dtype=np.float32)
+    for _, fold_probs, valid_idx in results:
+        meta_features[valid_idx] = fold_probs
 
-    _log_step(f"OOF meta-feature matrix: {meta_X.shape}")
-    return meta_X
-
+    if not np.isfinite(meta_features).all():
+        raise RuntimeError("OOF meta-feature matrix contains non-finite predictions.")
+    _log_step(f"OOF meta-feature matrix: {meta_features.shape}")
+    return meta_features
 
 # ===========================================================================
 # FULL PIPELINE
 # ===========================================================================
+
+def _split_train_validation_test(
+    X: np.ndarray,
+    y: np.ndarray,
+    split_strategy: str,
+    seed: int,
+    ordered_by_time: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Create disjoint 70/15/15 train, validation and final test partitions."""
+    if split_strategy == "temporal":
+        if not ordered_by_time:
+            raise ValueError(
+                "Temporal split requested, but data is not marked as sorted by source Time. "
+                "Load it with load_and_engineer_features() or choose stratified_random."
+            )
+        n_rows = len(y)
+        train_end = int(n_rows * 0.70)
+        valid_end = int(n_rows * 0.85)
+        X_train, X_valid, X_test = X[:train_end], X[train_end:valid_end], X[valid_end:]
+        y_train, y_valid, y_test = y[:train_end], y[train_end:valid_end], y[valid_end:]
+    elif split_strategy == "stratified_random":
+        X_development, X_test, y_development, y_test = train_test_split(
+            X, y, test_size=0.15, stratify=y, random_state=seed,
+        )
+        X_train, X_valid, y_train, y_valid = train_test_split(
+            X_development, y_development,
+            test_size=(0.15 / 0.85), stratify=y_development, random_state=seed,
+        )
+    else:
+        raise ValueError("split_strategy must be 'temporal' or 'stratified_random'.")
+
+    for name, labels in (("train", y_train), ("validation", y_valid), ("test", y_test)):
+        if len(np.unique(labels)) != 2:
+            raise ValueError(
+                f"The {name} partition contains only one class. "
+                "Use a different split or a dataset with more fraud examples."
+            )
+    return X_train, X_valid, X_test, y_train, y_valid, y_test
+
+
+def _predict_base_meta_features(base_learners: List[Any], X: np.ndarray) -> np.ndarray:
+    """Run raw feature rows through fitted preprocessing/model pipelines."""
+    return np.column_stack([
+        learner.predict_proba(X)[:, 1] for learner in base_learners
+    ]).astype(np.float32)
+
 
 def run_full_pipeline(
     X: pd.DataFrame,
@@ -639,200 +599,173 @@ def run_full_pipeline(
     checkpoint_dir: Path,
 ) -> Dict[str, Any]:
     """
-    End-to-end stacking ensemble pipeline.
+    Train and evaluate a stacking ensemble without using the final test set
+    for tuning, threshold selection, preprocessing or model selection.
 
-    Stages
-    ------
-    1. Global train/test split (80/20, stratified)
-    2. Tune each base learner on the training fold using RandomizedSearchCV
-    3. Generate OOF meta-features via parallelised k-fold stacking
-    4. Train meta-learner on OOF meta-features
-    5. Evaluate on held-out test set (full pipeline)
-    6. Calibrate final model with Platt scaling
-    7. Threshold optimisation on test set
-    8. Save artefacts: model, scalers, metrics JSON
-
-    Parameters
-    ----------
-    X             : Feature DataFrame
-    y             : Label Series
-    cfg           : CONFIG dict
-    output_dir    : Directory for model / metrics artefacts
-    fig_dir       : Directory for figures
-    checkpoint_dir: Directory for per-learner checkpoints
-
-    Returns
-    -------
-    results dict containing metrics at both thresholds
+    Default protocol: chronological 70% train / 15% validation / 15% test.
+    A stratified random split is available for comparison, not as the online
+    deployment evidence.
     """
-    from sklearn.model_selection import train_test_split
-
     _log_step("Starting full pipeline …")
-    X_arr = X.values.astype(np.float32)
-    y_arr = y.values
-
-    # ── Train / test split ─────────────────────────────────────────────────
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_arr, y_arr,
-        test_size=0.2,
-        stratify=y_arr,
-        random_state=cfg["random_state"],
+    X_array = X.to_numpy(dtype=np.float32)
+    y_array = y.to_numpy(dtype=np.int8)
+    strategy = cfg.get("split_strategy", "temporal")
+    X_train, X_valid, X_test, y_train, y_valid, y_test = _split_train_validation_test(
+        X_array, y_array, strategy, cfg["random_state"],
+        ordered_by_time=bool(X.attrs.get("ordered_by_time", False)),
     )
-    _log_step(f"Train: {X_train.shape} | Test: {X_test.shape}")
-
-    # ── Preprocess full training set for tuning ────────────────────────────
-    X_train_sc, X_test_sc, y_train_res = preprocess(
-        X_train, X_test, y_train,
-        cfg["smote_sampling_strategy"],
-        cfg["random_state"],
+    _log_step(
+        f"Split ({strategy}): train={X_train.shape}, validation={X_valid.shape}, "
+        f"test={X_test.shape}"
     )
 
     cv = StratifiedKFold(
-        n_splits=cfg["n_folds"],
-        shuffle=True,
-        random_state=cfg["random_state"],
+        n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"],
     )
+    learners = [
+        _tune_logistic_regression(X_train, y_train, cv, cfg, checkpoint_dir),
+        _tune_random_forest(X_train, y_train, cv, cfg, checkpoint_dir),
+        _tune_xgboost(X_train, y_train, cv, cfg, checkpoint_dir),
+    ]
 
-    # ── Tune base learners ─────────────────────────────────────────────────
-    lr_clf = _tune_logistic_regression(X_train_sc, y_train_res, cv, cfg, checkpoint_dir)
-    rf_clf = _tune_random_forest(X_train_sc, y_train_res, cv, cfg, checkpoint_dir)
-    xgb_clf = _tune_xgboost(X_train_sc, y_train_res, cv, cfg, checkpoint_dir)
-    base_learners = [lr_clf, rf_clf, xgb_clf]
-
-    # ── Generate OOF meta-features ─────────────────────────────────────────
+    _log_step("Generating out-of-fold training meta-features …")
     meta_X_train = generate_oof_meta_features(
-        X_train, y_train,
-        base_learners=base_learners,
-        cv=cv,
-        smote_ratio=cfg["smote_sampling_strategy"],
-        n_jobs=cfg["n_jobs"],
-        random_state=cfg["random_state"],
+        X_train, y_train, learners, cv,
+        cfg["smote_sampling_strategy"], cfg["n_jobs"], cfg["random_state"],
     )
-
-    # ── Train meta-learner ─────────────────────────────────────────────────
-    _log_step("Training meta-learner (Logistic Regression) …")
-    meta_lr = LogisticRegression(
-        C=cfg["meta_lr_C"],
-        solver=cfg["meta_lr_solver"],
-        max_iter=cfg["meta_lr_max_iter"],
-        random_state=cfg["random_state"],
+    meta_learner = LogisticRegression(
+        C=cfg["meta_lr_C"], solver=cfg["meta_lr_solver"],
+        max_iter=cfg["meta_lr_max_iter"], random_state=cfg["random_state"],
     )
-    meta_lr.fit(meta_X_train, y_train)
+    meta_learner.fit(meta_X_train, y_train)
 
-    # ── Build test meta-features ───────────────────────────────────────────
-    _log_step("Generating test meta-features …")
-    scaler_final = StandardScaler()
-    X_train_final_sc = scaler_final.fit_transform(X_train)
-    X_test_final_sc = scaler_final.transform(X_test)
+    meta_X_valid = _predict_base_meta_features(learners, X_valid)
+    meta_X_test = _predict_base_meta_features(learners, X_test)
+    valid_prob = meta_learner.predict_proba(meta_X_valid)[:, 1]
+    test_prob = meta_learner.predict_proba(meta_X_test)[:, 1]
 
-    meta_X_test = np.column_stack([
-        clf.predict_proba(X_test_final_sc)[:, 1] for clf in base_learners
-    ]).astype(np.float32)
+    # The operating threshold is selected on the validation partition only.
+    optimal_threshold = find_optimal_threshold(y_valid, valid_prob)
+    validation_metrics = compute_metrics(y_valid, valid_prob, optimal_threshold)
+    metrics_05 = compute_metrics(y_test, test_prob, threshold=0.5)
+    metrics_opt = compute_metrics(y_test, test_prob, threshold=optimal_threshold)
 
-    # ── Inference ─────────────────────────────────────────────────────────
-    y_prob_test = meta_lr.predict_proba(meta_X_test)[:, 1]
+    LOG.info("Validation-selected operating threshold: %.6f", optimal_threshold)
+    LOG.info("Final untouched test metrics (threshold 0.50): %s", metrics_05)
+    LOG.info("Final untouched test metrics (validation threshold): %s", metrics_opt)
 
-    # ── Threshold selection on validation-only predictions ─────────────────
-    # The test set is never used to choose the operating threshold.
-    meta_cv = StratifiedKFold(n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"])
-    meta_val_prob = cross_val_predict(
-        LogisticRegression(
-            C=cfg["meta_lr_C"],
-            solver=cfg["meta_lr_solver"],
-            max_iter=cfg["meta_lr_max_iter"],
-            random_state=cfg["random_state"],
-        ),
-        meta_X_train,
-        y_train,
-        cv=meta_cv,
-        method="predict_proba",
-        n_jobs=cfg["n_jobs"],
-    )[:, 1]
-    opt_thresh = find_optimal_threshold(y_train, meta_val_prob)
-    metrics_05 = compute_metrics(y_test, y_prob_test, threshold=0.5)
-    metrics_opt = compute_metrics(y_test, y_prob_test, threshold=opt_thresh)
+    _save_roc_curve(y_test, test_prob, fig_dir)
+    _save_pr_curve(y_test, test_prob, fig_dir)
+    _save_confusion_matrix(y_test, test_prob, optimal_threshold, fig_dir)
+    _save_calibration_curve(y_test, test_prob, fig_dir)
+    try:
+        _save_shap_summary(
+            meta_learner, meta_X_test,
+            feature_names=["LR_prob", "RF_prob", "XGB_prob"], fig_dir=fig_dir,
+        )
+        _save_permutation_importance(
+            meta_learner, meta_X_test, y_test,
+            feature_names=["LR_prob", "RF_prob", "XGB_prob"], fig_dir=fig_dir,
+        )
+    except Exception as exc:
+        LOG.warning("Optional meta-feature explainability plots were skipped: %s", exc)
 
-    LOG.info("=" * 70)
-    LOG.info("RESULTS @ threshold = 0.50")
-    for k, v in metrics_05.items():
-        LOG.info(f"  {k:15s}: {v}")
-    LOG.info(f"\nOptimal threshold = {opt_thresh:.4f}")
-    LOG.info("RESULTS @ optimal threshold")
-    for k, v in metrics_opt.items():
-        LOG.info(f"  {k:15s}: {v}")
-    LOG.info("=" * 70)
-
-    # ── Save figures ───────────────────────────────────────────────────────
-    _save_roc_curve(y_test, y_prob_test, fig_dir)
-    _save_pr_curve(y_test, y_prob_test, fig_dir)
-    _save_confusion_matrix(y_test, y_prob_test, opt_thresh, fig_dir)
-    _save_calibration_curve(y_test, y_prob_test, fig_dir)
-
-    # ── Feature importance (SHAP + permutation) ────────────────────────────
-    _save_shap_summary(
-        meta_lr, meta_X_test,
-        feature_names=["LR_prob", "RF_prob", "XGB_prob"],
-        fig_dir=fig_dir,
-    )
-    _save_permutation_importance(
-        meta_lr, meta_X_test, y_test,
-        feature_names=["LR_prob", "RF_prob", "XGB_prob"],
-        fig_dir=fig_dir,
-    )
-
-    # ── Save model bundle ──────────────────────────────────────────────────
     model_bundle = {
-        "base_learners": base_learners,
-        "meta_learner": meta_lr,
-        "scaler": scaler_final,
+        "model_schema_version": "2.0",
+        "base_learners": learners,
+        "meta_learner": meta_learner,
+        # New bundles preprocess inside each base learner pipeline.
+        "scaler": None,
+        "preprocessing_in_estimators": True,
         "feature_names": list(X.columns),
-        "optimal_threshold": opt_thresh,
-        "model_version": "stacking-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ"),
-        "evaluation_protocol": {
-            "threshold_selected_on": "cross-validated training meta-features",
+        "optimal_threshold": float(optimal_threshold),
+        "model_version": "stacking-2.0-" + datetime.utcnow().strftime("%Y%m%dT%H%M%SZ"),
+        "training_provenance": {
+            "dataset": "Kaggle ULB Credit Card Fraud Detection",
+            "split_strategy": strategy,
+            "training_rows": int(len(y_train)),
+            "validation_rows": int(len(y_valid)),
+            "test_rows": int(len(y_test)),
+            "threshold_selected_on": "validation partition",
             "test_set_used_for_threshold_selection": False,
-            "temporal_validation": False,
         },
-        "config": cfg,
+        "evaluation_protocol": {
+            "threshold_selected_on": "held-out validation partition",
+            "test_set_used_for_threshold_selection": False,
+            "temporal_validation": strategy == "temporal",
+            "resampling": "SMOTE inside every training fold via imbalanced-learn Pipeline",
+            "scaling": "StandardScaler inside every training fold via imbalanced-learn Pipeline",
+        },
+        "config": {key: value for key, value in cfg.items() if not key.endswith("_grid")},
     }
     model_path = output_dir / "stacking_model.pkl"
     joblib.dump(model_bundle, model_path)
     _log_step(f"Model bundle saved → {model_path}")
 
-    # ── Reproducibility assertion ──────────────────────────────────────────
-    LOG.info("Reproducibility check: reloading model and asserting identical predictions …")
+    # Verify the serialized bundle follows the same full inference path.
     reloaded = joblib.load(model_path)
-    y_prob_reloaded = reloaded["meta_learner"].predict_proba(meta_X_test)[:, 1]
-    assert np.allclose(y_prob_test, y_prob_reloaded, atol=1e-6), \
-        "FAIL: Reloaded model predictions differ from original!"
-    LOG.info("Reproducibility assertion PASSED ✓")
+    reloaded_meta = _predict_base_meta_features(reloaded["base_learners"], X_test)
+    reloaded_prob = reloaded["meta_learner"].predict_proba(reloaded_meta)[:, 1]
+    if not np.allclose(test_prob, reloaded_prob, atol=1e-6):
+        raise RuntimeError("Reloaded model bundle produced different predictions.")
 
-    # ── Save metrics JSON ──────────────────────────────────────────────────
-    metrics_combined = {
+    metrics = {
         "threshold_0.5": metrics_05,
         "threshold_optimal": metrics_opt,
-        "optimal_threshold_value": opt_thresh,
+        "optimal_threshold_value": float(optimal_threshold),
+        "validation_threshold_metrics": validation_metrics,
         "threshold_selection": {
-            "method": "F1 maximization",
-            "selection_data": "cross-validated training meta-features",
+            "method": "F1 maximisation",
+            "selection_data": "held-out validation partition",
             "test_set_used": False,
         },
-        "evaluation_limitations": {
-            "temporal_validation": "not performed",
-            "external_dataset_validation": "not performed",
+        "split_protocol": {
+            "strategy": strategy,
+            "train_fraction": 0.70,
+            "validation_fraction": 0.15,
+            "test_fraction": 0.15,
+            "test_partition_used_for": "one-time final evaluation only",
         },
+        "evaluation_limitations": {
+            "external_dataset_validation": "not performed",
+            "live_production_validation": "not performed",
+        },
+        "model_version": model_bundle["model_version"],
     }
-    metrics_path = output_dir / "metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(metrics_combined, f, indent=2, default=float)
-    _log_step(f"Metrics saved → {metrics_path}")
-
-    return metrics_combined
-
+    with open(output_dir / "metrics.json", "w", encoding="utf-8") as stream:
+        json.dump(metrics, stream, indent=2, default=float)
+    _log_step(f"Metrics saved → {output_dir / 'metrics.json'}")
+    return metrics
 
 # ===========================================================================
 # STABILITY ANALYSIS
 # ===========================================================================
+
+def _build_default_learners(cfg: Dict[str, Any], seed: int) -> List[ImbPipeline]:
+    """Compact fixed-parameter learners for supplementary robustness studies."""
+    local_cfg = dict(cfg)
+    return [
+        _pipeline(
+            LogisticRegression(C=0.1, solver="liblinear", max_iter=1000, random_state=seed),
+            local_cfg, seed,
+        ),
+        _pipeline(
+            RandomForestClassifier(
+                n_estimators=200, max_depth=20, class_weight="balanced",
+                n_jobs=1, random_state=seed,
+            ),
+            local_cfg, seed,
+        ),
+        _pipeline(
+            XGBClassifier(
+                n_estimators=300, max_depth=5, learning_rate=0.1,
+                scale_pos_weight=1, n_jobs=1, random_state=seed,
+                eval_metric="aucpr", tree_method="hist", verbosity=0,
+            ),
+            local_cfg, seed,
+        ),
+    ]
+
 
 def run_stability_analysis(
     X: pd.DataFrame,
@@ -843,116 +776,63 @@ def run_stability_analysis(
     n_runs: int,
 ) -> Dict[str, Any]:
     """
-    Repeat the full CV loop across `n_runs` random seeds to assess stability.
+    Supplementary repeated-stratified-split robustness check.
 
-    Computes mean ± std and 95% confidence intervals for each metric.
-
-    Parameters
-    ----------
-    X         : Feature DataFrame
-    y         : Label Series
-    cfg       : CONFIG dict
-    output_dir: Output directory
-    fig_dir   : Figure directory
-    n_runs    : Number of independent runs (default 5)
-
-    Returns
-    -------
-    stability_report : dict with mean, std, and 95% CI per metric
+    These intervals describe sensitivity to random partitioning on this
+    benchmark. They are not a substitute for chronological or external
+    validation and are labeled as such in the output.
     """
-    _log_step(f"Starting stability analysis ({n_runs} runs) …")
-    from sklearn.model_selection import train_test_split
-
+    if n_runs < 2:
+        raise ValueError("At least two runs are required for a stability interval.")
+    _log_step(f"Starting supplementary stability analysis ({n_runs} runs) …")
+    X_array = X.to_numpy(dtype=np.float32)
+    y_array = y.to_numpy(dtype=np.int8)
     run_metrics: List[Dict[str, float]] = []
-    X_arr = X.values.astype(np.float32)
-    y_arr = y.values
 
     for run in tqdm(range(n_runs), desc="Stability Runs", unit="run"):
         seed = cfg["random_state"] + run * 1000
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            X_arr, y_arr,
-            test_size=0.2,
-            stratify=y_arr,
-            random_state=seed,
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_array, y_array, test_size=0.2, stratify=y_array, random_state=seed,
         )
-        X_tr_sc, X_te_sc, y_tr_res = preprocess(
-            X_tr, X_te, y_tr,
-            cfg["smote_sampling_strategy"],
-            seed,
-        )
+        learners = _build_default_learners(cfg, seed)
         cv = StratifiedKFold(n_splits=cfg["n_folds"], shuffle=True, random_state=seed)
-
-        # Lightweight quick train (no hyperparameter search — use saved best params)
-        rf = RandomForestClassifier(
-            n_estimators=200,
-            max_depth=20,
-            class_weight="balanced",
-            n_jobs=cfg["n_jobs"],
-            random_state=seed,
+        meta_train = generate_oof_meta_features(
+            X_train, y_train, learners, cv,
+            cfg["smote_sampling_strategy"], cfg["n_jobs"], seed,
+            desc=f"Stability OOF {run + 1}",
         )
-        xgb = XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.1,
-            scale_pos_weight=50,
-            n_jobs=cfg["n_jobs"],
-            random_state=seed,
-            verbosity=0,
-            use_label_encoder=False,
-            eval_metric="aucpr",
-        )
-        lr_base = LogisticRegression(C=0.1, max_iter=1000, random_state=seed)
-        base_learners = [lr_base, rf, xgb]
-        for clf in base_learners:
-            clf.fit(X_tr_sc, y_tr_res)
+        for learner in learners:
+            learner.fit(X_train, y_train)
+        meta_test = _predict_base_meta_features(learners, X_test)
+        meta = LogisticRegression(C=1.0, max_iter=1000, random_state=seed)
+        meta.fit(meta_train, y_train)
+        probabilities = meta.predict_proba(meta_test)[:, 1]
+        run_metrics.append(compute_metrics(y_test, probabilities, threshold=0.5))
 
-        meta_X_te = np.column_stack([
-            clf.predict_proba(X_te_sc)[:, 1] for clf in base_learners
-        ]).astype(np.float32)
-
-        meta_X_tr = generate_oof_meta_features(
-            X_tr, y_tr,
-            base_learners=base_learners,
-            cv=cv,
-            smote_ratio=cfg["smote_sampling_strategy"],
-            n_jobs=cfg["n_jobs"],
-            random_state=seed,
-            desc=f"OOF Run {run+1}",
-        )
-        meta_lr = LogisticRegression(C=1.0, max_iter=1000, random_state=seed)
-        meta_lr.fit(meta_X_tr, y_tr)
-        y_prob = meta_lr.predict_proba(meta_X_te)[:, 1]
-        run_metrics.append(compute_metrics(y_te, y_prob))
-
-    # ── Aggregate ─────────────────────────────────────────────────────────
     metric_keys = ["AUPRC", "ROC_AUC", "F1", "MCC", "Precision", "Recall"]
-    stability_report: Dict[str, Any] = {}
-    alpha = 0.05
-    n = len(run_metrics)
-
+    report: Dict[str, Any] = {
+        "protocol": "Repeated stratified random 80/20 splits; supplementary only",
+        "n_runs": n_runs,
+        "threshold": 0.5,
+        "metrics": {},
+    }
+    t_critical = stats.t.ppf(0.975, df=n_runs - 1)
     for key in metric_keys:
-        vals = np.array([m[key] for m in run_metrics])
-        mean = float(np.mean(vals))
-        std = float(np.std(vals, ddof=1))
-        t_crit = stats.t.ppf(1 - alpha / 2, df=n - 1)
-        ci = t_crit * std / np.sqrt(n)
-        stability_report[key] = {
-            "mean": mean,
-            "std": std,
-            "ci_95_lower": mean - ci,
-            "ci_95_upper": mean + ci,
+        values = np.asarray([item[key] for item in run_metrics], dtype=float)
+        mean = float(values.mean())
+        std = float(values.std(ddof=1))
+        margin = float(t_critical * std / np.sqrt(n_runs))
+        report["metrics"][key] = {
+            "mean": mean, "std": std,
+            "ci_95_lower": mean - margin, "ci_95_upper": mean + margin,
         }
-        LOG.info(
-            f"  {key:10s}: {mean:.4f} ± {std:.4f}  "
-            f"95% CI [{mean-ci:.4f}, {mean+ci:.4f}]"
-        )
+        LOG.info("%s: %.4f ± %.4f; 95%% t interval [%.4f, %.4f]",
+                 key, mean, std, mean-margin, mean+margin)
 
-    stab_path = output_dir / "stability_report.json"
-    with open(stab_path, "w") as f:
-        json.dump(stability_report, f, indent=2)
-    _log_step(f"Stability report saved → {stab_path}")
-    return stability_report
-
+    with open(output_dir / "stability_report.json", "w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+    _log_step(f"Stability report saved → {output_dir / 'stability_report.json'}")
+    return report
 
 # ===========================================================================
 # ABLATION STUDY
@@ -964,108 +844,52 @@ def run_ablation_study(
     cfg: Dict[str, Any],
     output_dir: Path,
 ) -> pd.DataFrame:
-    """
-    Ablation study: evaluate stacking with 1, 2, and 3 base learners.
-
-    Combinations tested
-    -------------------
-    1 learner : [XGBoost]  (strongest single learner)
-    2 learners: [RF, XGBoost]
-    3 learners: [LR, RF, XGBoost]
-
-    Parameters
-    ----------
-    X         : Feature DataFrame
-    y         : Label Series
-    cfg       : CONFIG dict
-    output_dir: Results directory
-
-    Returns
-    -------
-    ablation_df : DataFrame with AUPRC, F1, MCC per combination
-    """
-    from sklearn.model_selection import train_test_split
-
-    _log_step("Running ablation study …")
-    X_arr = X.values.astype(np.float32)
-    y_arr = y.values
-
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X_arr, y_arr, test_size=0.2,
-        stratify=y_arr, random_state=cfg["random_state"],
-    )
-    X_tr_sc, X_te_sc, y_tr_res = preprocess(
-        X_tr, X_te, y_tr,
-        cfg["smote_sampling_strategy"],
-        cfg["random_state"],
-    )
-
-    lr_base = LogisticRegression(C=0.1, max_iter=1000, random_state=cfg["random_state"])
-    rf = RandomForestClassifier(
-        n_estimators=200, max_depth=20,
-        class_weight="balanced",
-        n_jobs=cfg["n_jobs"],
+    """Compare XGBoost, RF+XGBoost and the full stack on a held-out split."""
+    X_array = X.to_numpy(dtype=np.float32)
+    y_array = y.to_numpy(dtype=np.int8)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_array, y_array, test_size=0.2, stratify=y_array,
         random_state=cfg["random_state"],
     )
-    xgb = XGBClassifier(
-        n_estimators=300, max_depth=5,
-        learning_rate=0.1, scale_pos_weight=50,
-        n_jobs=cfg["n_jobs"],
-        random_state=cfg["random_state"],
-        verbosity=0, use_label_encoder=False, eval_metric="aucpr",
-    )
-    all_learners = [
-        ("LR", lr_base),
-        ("RF", rf),
-        ("XGB", xgb),
-    ]
-    for _, clf in all_learners:
-        clf.fit(X_tr_sc, y_tr_res)
-
-    combos = [
-        ("XGBoost only",  [("XGB", xgb)]),
-        ("RF + XGBoost",  [("RF", rf), ("XGB", xgb)]),
-        ("LR + RF + XGB", all_learners),
+    learners = _build_default_learners(cfg, cfg["random_state"])
+    names = ["LR", "RF", "XGB"]
+    combinations = [
+        ("XGBoost only", [learners[2]]),
+        ("RF + XGBoost", [learners[1], learners[2]]),
+        ("LR + RF + XGBoost", learners),
     ]
 
     cv = StratifiedKFold(
-        n_splits=cfg["n_folds"], shuffle=True,
-        random_state=cfg["random_state"],
+        n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"],
     )
     rows = []
-    for combo_name, learners in tqdm(combos, desc="Ablation", unit="combo"):
-        lrns = [clf for _, clf in learners]
-        meta_X_tr = generate_oof_meta_features(
-            X_tr, y_tr, base_learners=lrns, cv=cv,
-            smote_ratio=cfg["smote_sampling_strategy"],
-            n_jobs=cfg["n_jobs"],
-            random_state=cfg["random_state"],
-            desc=f"Ablation: {combo_name}",
+    for combination_name, selected in tqdm(combinations, desc="Ablation", unit="combo"):
+        meta_train = generate_oof_meta_features(
+            X_train, y_train, selected, cv,
+            cfg["smote_sampling_strategy"], cfg["n_jobs"], cfg["random_state"],
+            desc=f"Ablation: {combination_name}",
         )
-        meta_X_te = np.column_stack([
-            clf.predict_proba(X_te_sc)[:, 1] for clf in lrns
-        ]).astype(np.float32)
-        meta_lr = LogisticRegression(C=1.0, max_iter=1000, random_state=cfg["random_state"])
-        meta_lr.fit(meta_X_tr, y_tr)
-        y_prob = meta_lr.predict_proba(meta_X_te)[:, 1]
-        m = compute_metrics(y_te, y_prob)
+        for learner in selected:
+            learner.fit(X_train, y_train)
+        meta_test = _predict_base_meta_features(selected, X_test)
+        meta = LogisticRegression(C=1.0, max_iter=1000, random_state=cfg["random_state"])
+        meta.fit(meta_train, y_train)
+        probabilities = meta.predict_proba(meta_test)[:, 1]
+        metrics = compute_metrics(y_test, probabilities, threshold=0.5)
         rows.append({
-            "Configuration": combo_name,
-            "AUPRC": m["AUPRC"],
-            "ROC_AUC": m["ROC_AUC"],
-            "F1": m["F1"],
-            "MCC": m["MCC"],
-            "Precision": m["Precision"],
-            "Recall": m["Recall"],
+            "Configuration": combination_name,
+            "AUPRC": metrics["AUPRC"],
+            "ROC_AUC": metrics["ROC_AUC"],
+            "F1_at_0.5": metrics["F1"],
+            "MCC_at_0.5": metrics["MCC"],
+            "Precision_at_0.5": metrics["Precision"],
+            "Recall_at_0.5": metrics["Recall"],
         })
 
-    ablation_df = pd.DataFrame(rows)
-    LOG.info("\nAblation Study Results:\n" + ablation_df.to_string(index=False))
-    ablation_path = output_dir / "ablation_results.csv"
-    ablation_df.to_csv(ablation_path, index=False)
-    _log_step(f"Ablation results saved → {ablation_path}")
-    return ablation_df
-
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output_dir / "ablation_results.csv", index=False)
+    LOG.info("Ablation results (threshold=0.5):\n%s", frame.to_string(index=False))
+    return frame
 
 # ===========================================================================
 # LEARNING CURVES
@@ -1077,67 +901,52 @@ def run_learning_curves(
     cfg: Dict[str, Any],
     fig_dir: Path,
 ) -> None:
-    """
-    Generate learning curves showing AUPRC vs training-set size.
-
-    Uses XGBoost (strongest single learner) as a proxy for the full ensemble,
-    which allows fast generation without running full stacking at each size.
-
-    Parameters
-    ----------
-    X       : Feature DataFrame
-    y       : Label Series
-    cfg     : CONFIG dict
-    fig_dir : Figure output directory
-    """
-    _log_step("Generating learning curves …")
-    X_sc = StandardScaler().fit_transform(X.values.astype(np.float32))
-    y_arr = y.values
-
-    clf = XGBClassifier(
-        n_estimators=300, max_depth=5,
-        learning_rate=0.1, scale_pos_weight=50,
-        n_jobs=cfg["n_jobs"],
-        random_state=cfg["random_state"],
-        verbosity=0, use_label_encoder=False, eval_metric="aucpr",
+    """Generate fold-safe XGBoost learning curves using average precision."""
+    _log_step("Generating fold-safe learning curves …")
+    estimator = _pipeline(
+        XGBClassifier(
+            n_estimators=300, max_depth=5, learning_rate=0.1,
+            scale_pos_weight=1, n_jobs=1, random_state=cfg["random_state"],
+            eval_metric="aucpr", tree_method="hist", verbosity=0,
+        ),
+        cfg, cfg["random_state"],
     )
-
-    train_sizes, train_scores, val_scores = learning_curve(
-        clf, X_sc, y_arr,
-        cv=StratifiedKFold(n_splits=cfg["n_folds"], shuffle=True,
-                           random_state=cfg["random_state"]),
+    cv = StratifiedKFold(
+        n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"],
+    )
+    sizes, train_scores, validation_scores = learning_curve(
+        estimator,
+        X.to_numpy(dtype=np.float32),
+        y.to_numpy(dtype=np.int8),
+        cv=cv,
         scoring="average_precision",
-        train_sizes=np.linspace(0.1, 1.0, 10),
+        train_sizes=np.linspace(0.2, 1.0, 5),
         n_jobs=cfg["n_jobs"],
-        verbose=0,
+        error_score="raise",
     )
-
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(train_sizes, train_scores.mean(axis=1), "o-", label="Training AUPRC", color="#2196F3")
+    ax.plot(sizes, train_scores.mean(axis=1), "o-", label="Training AUPRC")
     ax.fill_between(
-        train_sizes,
+        sizes,
         train_scores.mean(axis=1) - train_scores.std(axis=1),
         train_scores.mean(axis=1) + train_scores.std(axis=1),
-        alpha=0.15, color="#2196F3",
+        alpha=0.15,
     )
-    ax.plot(train_sizes, val_scores.mean(axis=1), "o-", label="Validation AUPRC", color="#F44336")
+    ax.plot(sizes, validation_scores.mean(axis=1), "o-", label="Validation AUPRC")
     ax.fill_between(
-        train_sizes,
-        val_scores.mean(axis=1) - val_scores.std(axis=1),
-        val_scores.mean(axis=1) + val_scores.std(axis=1),
-        alpha=0.15, color="#F44336",
+        sizes,
+        validation_scores.mean(axis=1) - validation_scores.std(axis=1),
+        validation_scores.mean(axis=1) + validation_scores.std(axis=1),
+        alpha=0.15,
     )
-    ax.set_xlabel("Training Set Size", fontsize=13)
-    ax.set_ylabel("AUPRC", fontsize=13)
-    ax.set_title("Learning Curves (XGBoost — AUPRC vs Training Size)", fontsize=14, fontweight="bold")
-    ax.legend(fontsize=12)
-    ax.grid(True, linestyle="--", alpha=0.4)
-    plt.tight_layout()
-    path = fig_dir / "learning_curves.png"
-    fig.savefig(path, dpi=180, bbox_inches="tight")
+    ax.set_xlabel("Training rows")
+    ax.set_ylabel("Average precision (AUPRC)")
+    ax.set_title("Fold-safe XGBoost learning curves")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(fig_dir / "learning_curves.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
-    _log_step(f"Learning curves saved → {path}")
-
 
 # ===========================================================================
 # FIGURES
@@ -1323,7 +1132,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-folds", type=int, default=CONFIG["n_folds"],
                    help="Number of StratifiedKFold folds.")
     p.add_argument("--n-stability-runs", type=int, default=CONFIG["n_stability_runs"],
-                   help="Number of stability analysis runs.")
+                   help="Number of supplementary stability analysis runs.")
+    p.add_argument("--split-strategy", choices=["temporal", "stratified_random"], default="temporal",
+                   help="Default: chronological 70/15/15. Random split is supplementary.")
     p.add_argument("--skip-ablation", action="store_true",
                    help="Skip the ablation study.")
     p.add_argument("--skip-learning-curves", action="store_true",
@@ -1347,6 +1158,7 @@ def main() -> None:
     CONFIG["smote_sampling_strategy"] = args.smote_ratio
     CONFIG["n_folds"] = args.n_folds
     CONFIG["n_stability_runs"] = args.n_stability_runs
+    CONFIG["split_strategy"] = args.split_strategy
 
     # ── Directory setup ────────────────────────────────────────────────────
     output_dir = Path(args.output_dir)
