@@ -193,10 +193,15 @@ def predict_transaction(
     import numpy as np
     feature_names = bundle.get("feature_names", [f"V{i}" for i in range(1, 29)] + ["Amount_log", "Hour"])
     x = np.array([[features.get(f, 0.0) for f in feature_names]], dtype=np.float32)
-    scaler = bundle["scaler"]
-    x_sc = scaler.transform(x)
+    if bundle.get("preprocessing_in_estimators", False):
+        model_input = x
+    else:
+        scaler = bundle.get("scaler")
+        if scaler is None:
+            raise ValueError("Model bundle has no supported preprocessing strategy.")
+        model_input = scaler.transform(x)
     base_probs = np.array([
-        clf.predict_proba(x_sc)[0, 1] for clf in bundle["base_learners"]
+        clf.predict_proba(model_input)[0, 1] for clf in bundle["base_learners"]
     ])
     meta_x = base_probs.reshape(1, -1)
     fraud_prob = float(bundle["meta_learner"].predict_proba(meta_x)[0, 1])
@@ -251,43 +256,44 @@ with st.sidebar:
 if page == "🏠 Home":
     st.title("🛡️ Ensemble Machine Learning for Credit Card Fraud Detection")
     st.markdown(
-        "> *A production-ready stacking ensemble achieving AUPRC 0.903 and MCC 0.884 — "
-        "developed as a Final Year Computer Science Project.*"
+        "> *A research prototype exploring stacked classifiers for highly imbalanced transaction data. "
+        "Benchmark metrics are shown only when a saved experiment report is available.*"
     )
 
     # ── Key Metrics Cards ──────────────────────────────────────────────────
-    st.markdown("### Key Performance Metrics")
+    st.markdown("### Performance snapshot")
     metrics_data = load_metrics()
-    
+
     if metrics_data:
         m = metrics_data.get("threshold_optimal", {})
-        auprc  = m.get("AUPRC", 0.903)
-        f1     = m.get("F1", 0.881)
-        mcc    = m.get("MCC", 0.884)
-        roc    = m.get("ROC_AUC", 0.979)
-        prec   = m.get("Precision", 0.901)
-        recall = m.get("Recall", 0.862)
+        metric_keys = [
+            ("AUPRC", "Average precision", "Primary imbalanced-data metric"),
+            ("F1", "F1-score", "At the saved operating threshold"),
+            ("MCC", "Matthews correlation", "Uses all confusion-matrix cells"),
+            ("ROC_AUC", "ROC-AUC", "Ranking discrimination"),
+            ("Precision", "Precision", "Share of alerts that are fraud"),
+            ("Recall", "Recall", "Share of fraud cases detected"),
+        ]
+        columns = st.columns(3)
+        for index, (key, label, caption) in enumerate(metric_keys):
+            with columns[index % 3]:
+                value = m.get(key)
+                st.metric(label, f"{float(value):.4f}" if value is not None else "—")
+                st.caption(caption)
+        if metrics_data.get("note"):
+            st.info(f"Dataset note: {metrics_data['note']}")
+        if metrics_data.get("split_protocol"):
+            st.caption(
+                "Evaluation split: "
+                + str(metrics_data["split_protocol"].get("strategy", "not recorded"))
+                + ". See results/metrics.json for protocol details."
+            )
     else:
-        auprc, f1, mcc, roc, prec, recall = 0.903, 0.881, 0.884, 0.979, 0.901, 0.862
-
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    metrics_display = [
-        (col1, "AUPRC", f"{auprc:.3f}", "Primary metric"),
-        (col2, "F1-Score", f"{f1:.3f}", "Optimal threshold"),
-        (col3, "MCC", f"{mcc:.3f}", "Balanced metric"),
-        (col4, "ROC-AUC", f"{roc:.3f}", "Discrimination"),
-        (col5, "Precision", f"{prec:.3f}", "Fraud alert accuracy"),
-        (col6, "Recall", f"{recall:.3f}", "Fraud detection rate"),
-    ]
-    for col, label, value, subtitle in metrics_display:
-        with col:
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3>{label}</h3>
-                <p>{value}</p>
-                <span>{subtitle}</span>
-            </div>
-            """, unsafe_allow_html=True)
+        st.info(
+            "No experiment metrics are loaded. The dashboard can still run in demo mode, "
+            "but benchmark scores will not be invented or inferred. Run the Kaggle experiment "
+            "to generate a genuine evaluation report."
+        )
 
     st.divider()
 
@@ -366,7 +372,7 @@ elif page == "⚡ Simulator":
         st.markdown("""
         - **V1–V14**: PCA-transformed transaction features (most discriminative)
         - **Amount**: Transaction value in Euros
-        - **Hour**: Hour of day (0–24, derived from Time feature)
+        - **Hour**: Elapsed hours since the first transaction in the source dataset (0–48), not wall-clock time
         
         For a demo, use the default values or try the pre-set fraud/legitimate scenarios below.
         """)
@@ -428,7 +434,7 @@ elif page == "⚡ Simulator":
                 step=0.01,
             )
             hour = st.slider(
-                "Hour of Day", min_value=0.0, max_value=24.0,
+                "Elapsed Hours Since First Transaction", min_value=0.0, max_value=48.0,
                 value=float(defaults.get("Hour", 12.0)),
                 step=0.1,
             )
@@ -541,7 +547,7 @@ elif page == "🔍 SHAP Explanations":
         shap_v2 = st.slider("V2", -15.0, 15.0, 0.0, 0.1)
         shap_v10 = st.slider("V10", -20.0, 10.0, 0.0, 0.1)
         shap_v14 = st.slider("V14", -20.0, 10.0, 0.0, 0.1)
-        shap_hour = st.slider("Hour", 0.0, 24.0, 12.0, 0.1)
+        shap_hour = st.slider("Elapsed hours", 0.0, 48.0, 12.0, 0.1)
 
     import math
     shap_features = {
