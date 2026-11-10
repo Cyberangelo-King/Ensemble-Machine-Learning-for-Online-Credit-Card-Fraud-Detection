@@ -19,6 +19,8 @@ services:
         value: "https://fraud-dashboard.onrender.com"
       - key: RATE_LIMIT_PER_MINUTE
         value: "120"
+      - key: MAX_WS_CONNECTIONS_PER_IP
+        value: "3"
       - key: MODEL_URL
         sync: false
       - key: MODEL_SHA256
