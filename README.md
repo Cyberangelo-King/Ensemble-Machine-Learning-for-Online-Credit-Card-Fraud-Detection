@@ -94,7 +94,6 @@ python src/run_experiment.py \
   --n-folds 5 \
   --n-stability-runs 5 \
   --split-strategy temporal
-
 ```
 
 **Outputs produced:**
