@@ -720,8 +720,16 @@ elif page == "📊 Metrics":
             "synthetic scores for missing benchmark results."
         )
     else:
+        if metrics_data.get("benchmark_status") == "synthetic_demo":
+            st.warning(
+                "SYNTHETIC DEMONSTRATION ONLY — these results come from generated data. "
+                "They are not evidence of performance on the Kaggle benchmark or real transactions."
+            )
+            st.markdown("### Synthetic demo holdout results")
+        else:
+            st.markdown("### Chronological benchmark holdout results")
         if metrics_data.get("note"):
-            st.warning(metrics_data["note"])
+            st.caption(metrics_data["note"])
         m_opt = metrics_data.get("threshold_optimal", {})
         m_05 = metrics_data.get("threshold_0.5", {})
         threshold = metrics_data.get("optimal_threshold_value")
@@ -742,7 +750,6 @@ elif page == "📊 Metrics":
                 f"test {protocol.get('test_fraction', '—')})."
             )
 
-        st.markdown("### Final holdout performance")
         metrics = [
             ("AUPRC", "Average precision"),
             ("ROC_AUC", "ROC-AUC"),
