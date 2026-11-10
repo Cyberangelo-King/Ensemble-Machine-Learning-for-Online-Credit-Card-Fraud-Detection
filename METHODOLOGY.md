@@ -207,7 +207,7 @@ The default experiment sorts records by the source Time field and partitions the
 
 The chronological order is preserved when the source dataset is loaded. The validation and final test partitions are never included in hyperparameter fitting or SMOTE. The validation set selects an operating threshold; the same frozen threshold is then applied to the final test scores.
 
-A stratified-random split is available as a supplementary comparison, but it should not be used as the primary evidence for an online/forward-in-time detection claim.
+Within the training partition, temporal experiments use expanding-window TimeSeriesSplit folds. The tuning subset is an early chronological prefix; OOF stacking rows are taken from a later suffix. Each OOF model sees only the earlier prefix plus earlier rows from the stack suffix, never later transactions. The first warm-up block in the stack suffix has no OOF prediction and is excluded from meta-learner fitting. A stratified-random protocol is available only as an explicitly optional comparison.
 
 ## 4. Stacking Ensemble Architecture
 
@@ -337,7 +337,7 @@ All base learner searches use `scoring='average_precision'` (AUPRC). This metric
 
 ### 6.2 Parallelisation Strategy
 
-The fold loop is parallelised with joblib.Parallel. Each fold receives independent estimator clones created with sklearn.base.clone. Base estimators use one internal CPU thread while CV controls outer parallelism; this avoids nested all-core parallelism and CPU oversubscription. The run configuration records the outer n_jobs setting.
+Temporal CV folds are expanding-window and never shuffle time. The optional stratified-random protocol uses shuffled StratifiedKFold. The fold loop is parallelised with joblib.Parallel. Each fold receives independent estimator clones created with sklearn.base.clone. Base estimators use one internal CPU thread while CV controls outer parallelism; this avoids nested all-core parallelism and CPU oversubscription. The run configuration records the outer n_jobs setting.
 
 ### 6.3 Validation and Test Meta-Features
 
