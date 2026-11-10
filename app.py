@@ -8,7 +8,7 @@ Version : 2.0.0
 Pages
 -----
 - Home           : Project overview, key metric cards, quick-start guide
-- Simulator      : Real-time transaction fraud probability
+- Simulator      : Per-transaction fraud probability estimate
 - SHAP           : SHAP waterfall + bar chart explanations
 - Metrics        : ROC, PR curve, confusion matrix, calibration
 - Dataset        : Feature distributions, class balance, statistics
@@ -370,7 +370,7 @@ streamlit run app.py""", language="bash")
 elif page == "⚡ Simulator":
     st.title("⚡ Transaction Fraud Simulator")
     st.markdown(
-        "Enter transaction features to get a real-time fraud probability estimate from the stacking ensemble."
+        "Enter transaction features to get a immediate fraud-probability estimate from the stacking ensemble."
     )
 
     if bundle is None:
