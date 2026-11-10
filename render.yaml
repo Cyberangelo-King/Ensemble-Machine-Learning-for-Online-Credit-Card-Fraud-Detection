@@ -2,7 +2,7 @@ services:
   # Research/demo API only. Do not connect this public service to real payment data.
   - type: web
     name: fraud-api
-    env: python
+    runtime: python
     region: oregon
     plan: free
     buildCommand: |
@@ -12,7 +12,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.0"
+        value: "3.11.18"
       - key: APP_ENV
         value: "demo"
       - key: ALLOWED_ORIGINS
