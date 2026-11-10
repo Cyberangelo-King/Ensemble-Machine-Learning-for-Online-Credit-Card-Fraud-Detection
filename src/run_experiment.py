@@ -730,6 +730,7 @@ def run_full_pipeline(
 
     model_bundle = {
         "model_schema_version": "2.0",
+        "feature_schema_version": "ulb-pca-elapsed-hours-v1",
         "base_learners": learners,
         "meta_learner": meta_learner,
         # New bundles preprocess inside each base learner pipeline.
@@ -771,6 +772,8 @@ def run_full_pipeline(
         raise RuntimeError("Reloaded model bundle produced different predictions.")
 
     metrics = {
+        "report_schema_version": 2,
+        "benchmark_status": "experimental_benchmark",
         "threshold_0.5": metrics_05,
         "threshold_optimal": metrics_opt,
         "optimal_threshold_value": float(optimal_threshold),
