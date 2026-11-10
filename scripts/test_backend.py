@@ -22,6 +22,8 @@ import importlib
 from pathlib import Path
 
 import pytest
+import pandas as pd
+import numpy as np
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -263,7 +265,7 @@ class TestExplain:
         if response.status_code != 200:
             pytest.skip("Explain endpoint not available (no model/data).")
         body = response.json()
-        for key in ("index", "features", "shap_values", "expected_value"):
+        for key in ("index", "features", "feature_names", "shap_values", "expected_value"):
             assert key in body, f"Missing key '{key}' in /explain/0 response"
 
     def test_explain_shap_values_length(self, sync_client):
@@ -293,6 +295,46 @@ class TestExplain:
         assert response.status_code in (404, 422, 503), (
             f"Expected 404/422/503 for /explain/-1, got {response.status_code}"
         )
+
+
+# =============================================================================
+# In-process WebSocket sample replay
+# =============================================================================
+
+class TestWebSocketDemoReplay:
+    def test_start_message_returns_frontend_compatible_sample(self, sync_client, monkeypatch):
+        """The React replay contract receives every field it renders."""
+        rows = 20
+        sample = pd.DataFrame({
+            **{f"V{i}": np.linspace(-1, 1, rows) for i in range(1, 29)},
+            "Amount": np.linspace(1, 200, rows),
+            "Time": np.arange(rows, dtype=float) * 3600,
+            "Class": np.tile([0, 1], rows // 2),
+        })
+        monkeypatch.setattr(backend_main.state, "model", {
+            "optimal_threshold": 0.5,
+            "model_version": "test-websocket-model",
+        })
+        monkeypatch.setattr(backend_main.state, "data", sample)
+        monkeypatch.setattr(backend_main, "API_KEY", "")
+        monkeypatch.setattr(
+            backend_main,
+            "_predict_raw",
+            lambda frame: (np.array([0.85]), np.array([1])),
+        )
+
+        with sync_client.websocket_connect("/ws/stream") as socket:
+            socket.send_json({"action": "start", "interval": 0.1})
+            message = socket.receive_json()
+            assert message["index"] >= 0
+            assert message["prediction"] == 1
+            assert message["actual"] in (0, 1)
+            assert message["probability"] == pytest.approx(0.85)
+            assert message["risk_level"] == "High"
+            assert message["latency_ms"] >= 0
+            assert message["features"]["Amount"] > 0
+            assert "V17" in message["features"]
+            socket.send_json({"action": "stop"})
 
 
 # =============================================================================
