@@ -7,7 +7,7 @@ Endpoints
 GET  /health           — Health check (always available, even if model not loaded)
 POST /predict          — Predict fraud probability for a single transaction
 GET  /explain/{index}  — Return SHAP explanation for a transaction by index
-WS   /ws/stream        — WebSocket stream of live transaction predictions
+WS   /ws/stream        — WebSocket demo stream using sample rows (not live network traffic)
 """
 
 from __future__ import annotations
@@ -425,12 +425,12 @@ async def explain(index: int) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket — live transaction stream
+# WebSocket — sample transaction replay (demo only)
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
-    """Stream dashboard transactions through the same bundle used by /predict."""
+    """Replay sample dashboard rows through /predict; this is not a live card-network feed."""
     await websocket.accept()
     logger.info("WebSocket client connected.")
     try:
