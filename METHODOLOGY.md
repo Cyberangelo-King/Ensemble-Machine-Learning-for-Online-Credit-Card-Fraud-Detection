@@ -123,9 +123,9 @@ Deployment documentation: [DEPLOYMENT.md](DEPLOYMENT.md)
 | Engineered features | 2 (Amount_log + Hour) |
 | Missing values | None |
 | Time span | 48 hours (172,792 seconds) |
-| Amount range | €0.00 – €25,691.16 |
-| Median Amount (legitimate) | €22.00 |
-| Median Amount (fraud) | €9.25 |
+| Amount range | Numeric source field; no currency conversion is performed |
+| Median Amount (legitimate) | Recomputed from the supplied dataset during EDA |
+| Median Amount (fraud) | Recomputed from the supplied dataset during EDA |
 
 ### Feature Descriptions
 
@@ -446,26 +446,15 @@ In deployment, the threshold can be adjusted to balance precision and recall bas
 
 The runner includes a supplementary repeated-stratified-random-split robustness analysis. Each run uses a new random 80/20 split, fold-local preprocessing and OOF meta-features. These results quantify sensitivity to partition choice on the benchmark; they do not replace the primary chronological holdout.
 
-### 9.2 Confidence Intervals
+### 9.2 Descriptive Split-Variability Intervals
 
-95% confidence intervals are computed using the Student t-distribution:
+The stability script computes a t-based interval around the scores from repeated stratified random 80/20 splits. These intervals are **descriptive sensitivity summaries only**. The random test partitions overlap, so the run-level scores are not independent observations. The interval must not be interpreted as a formal confidence interval for population performance, a significance test, or evidence of production generalisation.
 
-```
-mean(m) = Σ mᵢ / n
-std(m)  = √(Σ(mᵢ − mean)² / (n−1))
-SE      = std / √n
-CI₉₅   = mean ± t_{0.025, n-1} × SE
-```
-
-where t_{0.025, 4} ≈ 2.776 for n=5 runs.
-
-**Reporting rule:** state the observed mean, standard deviation and interval from the generated stability_report.json. No target interval is treated as an observed result.
+Report the observed mean, standard deviation, minimum/maximum and interval from stability_report.json, and clearly label the repeated-split protocol. The single chronological holdout remains the primary benchmark estimate.
 
 ### 9.3 Interpretation
 
-A narrow confidence interval (std < 0.005 for AUPRC) indicates the model is stable across different data partitions and not overfitted to a specific split. This is especially important for fraud detection where the small number of fraud cases (492 in total, ~101 in the test set) means different splits can contain substantially different fraud distributions.
-
----
+Use repeated-split results to understand how sensitive the model is to the particular random partition used in this small benchmark. Do not infer “no overfitting” from a narrow interval: overlapping splits, the small number of fraud cases and the limited two-day dataset prevent that conclusion. A future assessment should use multiple chronological windows and an independent dataset.
 
 ## 10. Ablation Methodology
 
@@ -477,54 +466,26 @@ The ablation study systematically removes base learners to quantify each one's c
 | **2 learners** | RF + XGBoost | Quantifies LR's marginal contribution |
 | **3 learners** | LR + RF + XGBoost | Full stacking ensemble (proposed system) |
 
-**Protocol:**  
-Each configuration uses identical hyperparameters (from the best-found configuration in the full experiment), the same train/test split, and the same SMOTE ratio. Only the set of base learners changes.
+**Protocol:** Each configuration uses the same supplementary stratified-random 80/20 split and the same SMOTE target ratio. The current ablation runner uses fixed reference hyperparameters defined in _build_default_learners; they are not the best hyperparameters selected by the main experiment search. Treat the table as an exploratory comparison, not a final tuned-model ranking.
 
-**Expected finding:** Each additional learner should increase AUPRC by 0.005–0.015, demonstrating that the diversity of predictions from diverse learners is beneficial (the "ensemble effect").
+**Interpretation:** The study measures whether the fixed learner combinations behave differently on the same split. It does not assume that adding a learner improves performance. Report the observed differences and variability without a predetermined expected uplift.
 
----
+## 11. Computational and Inference Benchmarking
 
-## 11. Computational Complexity Analysis
+The repository does not currently contain a verified runtime, per-transaction latency or peak-memory benchmark for the revised pipeline. Earlier timing and size estimates have therefore been removed rather than carried forward as measured facts.
 
-### 11.1 Training Complexity
-
-| Component | Complexity | Typical Time (4-core CPU) |
+| Component | Current evidence status | What a reproducible benchmark should record |
 |---|---|---|
-| SMOTE (per fold) | O(n × k_neighbours) | ~15s |
-| LR RandomSearch (20 iter) | O(20 × n × p) | ~2 min |
-| RF RandomSearch (30 iter) | O(30 × n_trees × n × log(n)) | ~25 min |
-| XGB RandomSearch (50 iter) | O(50 × n_rounds × n × p) | ~45 min |
-| OOF stacking (5 folds) | O(K × 3 × training_complexity) | ~30 min |
-| Total (full run) | — | ~2–3 hours |
+| Hyperparameter search | Not benchmarked on the current runner | Dataset hash, candidate count, folds, CPU/GPU, wall time |
+| OOF stacking | Not benchmarked on the current runner | Fold count, rows per fold, wall time and peak RAM |
+| Full experiment | Not benchmarked on the supplied machine | End-to-end wall time, CPU model, RAM, package versions |
+| Single-transaction inference | Not benchmarked on a named host | Warm-up, batch size 1 latency p50/p95/p99, throughput |
+| Model artifact size | Must be measured from generated bundle | File bytes and compression format |
+| Peak memory | Not benchmarked | Process RSS and peak system memory |
 
-With checkpointing, interrupted runs resume from the last saved base learner.
+To measure inference fairly, load the exact saved model bundle, warm the model, then time repeated single-row predictions and report p50, p95 and p99 latency. Include feature construction and serialization in a separate end-to-end measurement. Do not claim a production latency target until it has been measured on representative deployment hardware.
 
-### 11.2 Inference Complexity
-
-| Component | Time per transaction |
-|---|---|
-| Feature engineering | < 0.1 ms |
-| Scaling (StandardScaler) | < 0.1 ms |
-| LR prediction | ~0.05 ms |
-| RF prediction (200 trees) | ~0.8 ms |
-| XGB prediction | ~0.3 ms |
-| Meta-learner prediction | ~0.05 ms |
-| **Total** | **< 2 ms** |
-
-This comfortably meets the production requirement of < 5 ms for real-time fraud screening.
-
-### 11.3 Memory Usage
-
-| Artefact | Size |
-|---|---|
-| Dataset (float32) | ~110 MB |
-| SMOTE-augmented training set | ~180 MB |
-| RF model (200 trees) | ~280 MB |
-| XGB model | ~45 MB |
-| LR models | < 1 MB |
-| Full model bundle (.pkl) | ~330 MB |
-
----
+Theoretical training complexity depends on row count, feature count, number of candidates, number of CV folds, model hyperparameters and parallelism. The full run can be compute-intensive; use a hosted notebook or machine with sufficient memory for the complete benchmark.
 
 ## 12. Reproducibility Guarantees
 
@@ -534,8 +495,8 @@ All random operations receive explicit seeds derived from `CONFIG['random_state'
 
 | Component | Seed usage |
 |---|---|
-| `train_test_split` | `random_state=42` |
-| `StratifiedKFold` | `random_state=42` |
+| Primary temporal partition | Deterministic chronological ordering; no random split seed |
+| `StratifiedKFold` | `shuffle=True`, `random_state=42` in tuning and supplementary experiments |
 | `SMOTE` | `random_state=42` |
 | `LogisticRegression` | `random_state=42` |
 | `RandomForestClassifier` | `random_state=42` |
