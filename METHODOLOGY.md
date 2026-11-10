@@ -293,7 +293,7 @@ A simple **Logistic Regression** meta-learner is used deliberately. With only 3 
 
 | Parameter | Search Space | Notes |
 |---|---|---|
-| n_estimators | [200, 400, 600, 800] | Moderated by early stopping |
+| n_estimators | [200, 400, 600, 800] | Selected by cross-validated average precision; no shared early-stopping set |
 | max_depth | [3, 4, 5, 6, 7] | Shallow trees generalise better |
 | learning_rate | [0.01, 0.05, 0.1, 0.15, 0.2] | Lower LR → more trees needed |
 | subsample | [0.6–1.0] | Row subsampling (stochastic gradient) |
@@ -303,7 +303,7 @@ A simple **Logistic Regression** meta-learner is used deliberately. With only 3 
 | reg_alpha | [0, 0.01, 0.1, 1.0] | L1 regularisation |
 | reg_lambda | [0.5, 1.0, 2.0, 5.0] | L2 regularisation |
 | scale_pos_weight | [1, 5, 10, 50, 100] | Class imbalance correction |
-| **n_iter** | **50** | Manual random search with early stopping eval |
+| **n_iter** | **50** | RandomizedSearchCV using training-only folds and average precision |
 
 **Search protocol:** XGBoost is tuned through the same cross-validation interface as the other base learners. The implementation does not repeatedly reuse one globally held-out early-stopping set across hyperparameter trials. RandomizedSearchCV scores each candidate using average precision on its held-out CV folds and refits the selected pipeline on the development-training partition.
 
