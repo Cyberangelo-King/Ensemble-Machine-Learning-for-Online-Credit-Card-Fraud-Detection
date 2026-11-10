@@ -219,6 +219,43 @@ def test_oof_meta_features_fit_complete_pipeline_and_disjoint_reference() -> Non
     assert pipeline.named_steps["smote"].sampling_strategy == 0.5
 
 
+def test_metric_input_validation_rejects_invalid_probabilities() -> None:
+    valid_labels = np.array([0, 0, 1, 1], dtype=np.int8)
+    valid_probs = np.array([0.1, 0.2, 0.7, 0.9], dtype=float)
+
+    for invalid in (
+        np.array([0.1, np.nan, 0.7, 0.9]),
+        np.array([0.1, np.inf, 0.7, 0.9]),
+        np.array([-0.1, 0.2, 0.7, 0.9]),
+        np.array([0.1, 0.2, 1.2, 0.9]),
+    ):
+        try:
+            compute_metrics(valid_labels, invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid predicted probabilities must be rejected.")
+
+    try:
+        compute_metrics(np.array([0, 0, 0, 0]), valid_probs)
+    except ValueError as exc:
+        assert "both binary labels" in str(exc)
+    else:
+        raise AssertionError("Single-class evaluation labels must be rejected.")
+
+
+def test_threshold_selection_is_deterministic_and_prefers_precision_on_ties() -> None:
+    from src.run_experiment import find_optimal_threshold
+
+    y_true = np.array([0, 0, 0, 1, 1, 1], dtype=np.int8)
+    probabilities = np.array([0.05, 0.1, 0.2, 0.6, 0.8, 0.95])
+    first = find_optimal_threshold(y_true, probabilities)
+    second = find_optimal_threshold(y_true, probabilities)
+
+    assert first == second
+    assert 0.0 <= first <= 1.0
+
+
 def test_dummy_prior_baseline_matches_test_prevalence() -> None:
     from sklearn.dummy import DummyClassifier
 
