@@ -594,6 +594,11 @@ def generate_oof_meta_features(
     used for hyperparameter tuning. Each OOF fold trains on that reference set
     plus the non-held-out rows of X, while the held-out rows are used only for
     out-of-fold prediction. Hyperparameter search must never see X/y.
+
+    Forward-chaining validators (TimeSeriesSplit) intentionally leave their
+    initial warm-up rows without OOF predictions. Those rows remain zero here
+    and must be excluded with _oof_validation_indices() when fitting the
+    meta-learner. Do not treat warm-up zeros as model predictions.
     """
     if (reference_X is None) != (reference_y is None):
         raise ValueError("reference_X and reference_y must be supplied together.")
@@ -1373,7 +1378,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--smote-ratio", type=float, default=CONFIG["smote_sampling_strategy"],
                    help="SMOTE sampling_strategy (minority:majority ratio).")
     p.add_argument("--n-folds", type=int, default=CONFIG["n_folds"],
-                   help="Number of StratifiedKFold folds.")
+                   help="Number of expanding-window temporal folds (or stratified folds in random mode).")
     p.add_argument("--n-stability-runs", type=int, default=CONFIG["n_stability_runs"],
                    help="Number of supplementary stability analysis runs.")
     p.add_argument("--split-strategy", choices=["temporal", "stratified_random"], default="temporal",
