@@ -1,42 +1,58 @@
 services:
-  # ── Python / FastAPI backend ──────────────────────────────────────────────
+  # Research/demo API only. Do not connect this public service to real payment data.
   - type: web
     name: fraud-api
-    env: python
+    runtime: python
     region: oregon
     plan: free
     buildCommand: |
       pip install -r requirements.txt &&
       python scripts/fetch_model.py
     startCommand: uvicorn dashboard.backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.0"
+        value: "3.11.18"
+      - key: APP_ENV
+        value: "demo"
       - key: ALLOWED_ORIGINS
         value: "https://fraud-dashboard.onrender.com"
       - key: RATE_LIMIT_PER_MINUTE
         value: "120"
+      - key: MAX_WS_CONNECTIONS_PER_IP
+        value: "3"
       - key: MODEL_URL
         sync: false
       - key: MODEL_SHA256
         sync: false
-    healthCheckPath: /health
 
-  # ── Node / React frontend ─────────────────────────────────────────────────
+  # Vite output is static; no Node server or runtime web process is needed.
   - type: web
     name: fraud-dashboard
-    env: node
-    region: oregon
-    plan: free
-    buildCommand: cd dashboard/frontend && npm install && npm run build
-    startCommand: cd dashboard/frontend && npx serve -s dist -l $PORT
+    runtime: static
+    buildCommand: cd dashboard/frontend && npm ci && npm run build
+    staticPublishPath: dashboard/frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Permissions-Policy
+        value: "camera=(), microphone=(), geolocation=()"
     envVars:
       - key: NODE_VERSION
-        value: "18.17.0"
+        value: "24.22.1"
       - key: VITE_API_URL
-        # Must include protocol — fromService resolves the hostname only, so we
-        # prepend https:// explicitly.
         value: https://fraud-api.onrender.com
       - key: VITE_WS_URL
-        # WebSocket URL must use the wss:// (secure WebSocket) scheme.
         value: wss://fraud-api.onrender.com

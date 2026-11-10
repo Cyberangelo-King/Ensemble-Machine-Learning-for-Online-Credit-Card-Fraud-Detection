@@ -7,7 +7,7 @@ Endpoints
 GET  /health           — Health check (always available, even if model not loaded)
 POST /predict          — Predict fraud probability for a single transaction
 GET  /explain/{index}  — Return SHAP explanation for a transaction by index
-WS   /ws/stream        — WebSocket stream of live transaction predictions
+WS   /ws/stream        — WebSocket demo stream using sample rows (not live network traffic)
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import asyncio
 import json
 import time
 import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -70,13 +71,25 @@ async def lifespan(app: FastAPI):
     elif os.path.exists(MODEL_PATH):
         try:
             if MODEL_SHA256:
-                with open(MODEL_PATH, "rb") as model_file:
-                    digest = hashlib.sha256(model_file.read()).hexdigest()
+                digest = _sha256_file(MODEL_PATH)
                 if digest != MODEL_SHA256:
                     raise RuntimeError("MODEL_SHA256 integrity check failed")
             state.model = joblib.load(MODEL_PATH)
-            if not isinstance(state.model, dict) or "base_learners" not in state.model or "meta_learner" not in state.model or "scaler" not in state.model:
-                raise RuntimeError("Invalid model bundle schema")
+            if not isinstance(state.model, dict):
+                raise RuntimeError("Invalid model bundle schema: expected a dictionary")
+            required_keys = {"base_learners", "meta_learner", "feature_names", "feature_schema_version"}
+            missing_keys = required_keys - set(state.model)
+            if state.model.get("feature_schema_version") != "ulb-pca-elapsed-hours-v1":
+                raise RuntimeError(
+                    "Unsupported feature schema: regenerate the model using the current elapsed-hours contract."
+                )
+            pipeline_preprocessing = bool(state.model.get("preprocessing_in_estimators", False))
+            legacy_scaler_available = state.model.get("scaler") is not None
+            if missing_keys or not (pipeline_preprocessing or legacy_scaler_available):
+                raise RuntimeError(
+                    f"Invalid model bundle schema: missing={sorted(missing_keys)}, "
+                    "or no supported preprocessing strategy is declared"
+                )
             logger.info("Model loaded from %s", MODEL_PATH)
         except Exception as exc:
             logger.warning("Failed to load model from %s: %s", MODEL_PATH, exc)
@@ -132,6 +145,8 @@ async def lifespan(app: FastAPI):
 ALLOWED_ORIGINS: List[str] = [x.strip() for x in os.environ.get("ALLOWED_ORIGINS", "").split(",") if x.strip()]
 API_KEY = os.environ.get("FRAUD_API_KEY", "").strip()
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "120"))
+MAX_WS_CONNECTIONS_PER_IP = int(os.environ.get("MAX_WS_CONNECTIONS_PER_IP", "3"))
+_ws_connections: Dict[str, int] = {}
 MODEL_SHA256 = os.environ.get("MODEL_SHA256", "").strip().lower()
 _rate_buckets: Dict[str, List[float]] = {}
 
@@ -154,6 +169,15 @@ app.add_middleware(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Hash model artifacts incrementally before deserializing them."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _get_feature_columns(df: pd.DataFrame) -> List[str]:
     """Return feature columns (all except 'Class')."""
     return [c for c in df.columns if c != "Class"]
@@ -171,7 +195,13 @@ def _require_model() -> None:
 
 
 def _require_api_key(provided_key: Optional[str]) -> None:
-    if API_KEY and provided_key != API_KEY:
+    production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
+    if production_mode and not API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication is not configured. Set FRAUD_API_KEY before production startup.",
+        )
+    if API_KEY and not hmac.compare_digest(provided_key or "", API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
@@ -241,18 +271,29 @@ def _prepare_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Dataset is missing required columns: {missing}")
     out = df[required].copy()
     out["Amount_log"] = np.log1p(out["Amount"].astype(float))
-    out["Hour"] = (out["Time"].astype(float) % 86400) / 3600
+    # ULB Time is elapsed seconds from the first transaction, not clock time.
+    out["Hour"] = out["Time"].astype(float) / 3600.0
     feature_names = list(state.model.get("feature_names", []))
     return out[feature_names]
 
 
 def _predict_matrix(matrix: np.ndarray) -> np.ndarray:
-    frame = pd.DataFrame(matrix, columns=list(state.model["feature_names"]))
-    scaled = state.model["scaler"].transform(frame)
-    meta = np.column_stack([
-        clf.predict_proba(scaled)[:, 1] for clf in state.model["base_learners"]
+    """Predict using either a current pipeline bundle or a legacy demo bundle."""
+    feature_names = list(state.model["feature_names"])
+    frame = pd.DataFrame(matrix, columns=feature_names)
+    if state.model.get("preprocessing_in_estimators", False):
+        model_input = frame
+    else:
+        scaler = state.model.get("scaler")
+        if scaler is None:
+            raise RuntimeError("Legacy model bundle is missing its scaler.")
+        model_input = scaler.transform(frame)
+
+    meta_features = np.column_stack([
+        learner.predict_proba(model_input)[:, 1]
+        for learner in state.model["base_learners"]
     ])
-    return state.model["meta_learner"].predict_proba(meta)[:, 1]
+    return state.model["meta_learner"].predict_proba(meta_features)[:, 1]
 
 
 def _predict_raw(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -343,17 +384,15 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
             raise HTTPException(status_code=422, detail={"unknown_features": unknown})
         if not all(np.isfinite(float(v)) for v in feature_dict.values()):
             raise HTTPException(status_code=422, detail="All feature values must be finite numbers.")
-        if float(feature_dict["Amount"]) < 0:
-            raise HTTPException(status_code=422, detail="Amount must be non-negative.")
+        if float(feature_dict["Amount"]) < 0 or float(feature_dict["Time"]) < 0:
+            raise HTTPException(status_code=422, detail="Amount and Time must be non-negative.")
 
         row = dict(feature_dict)
         row["Amount_log"] = float(np.log1p(row["Amount"]))
-        row["Hour"] = float((row["Time"] % 86400) / 3600)
+        row["Hour"] = float(row["Time"] / 3600.0)
         expected_cols = list(state.model.get("feature_names", []))
         df_input = pd.DataFrame([{col: row[col] for col in expected_cols}], columns=expected_cols)
-        x_sc = state.model["scaler"].transform(df_input)
-        meta_x = np.column_stack([clf.predict_proba(x_sc)[:, 1] for clf in state.model["base_learners"]])
-        proba = float(state.model["meta_learner"].predict_proba(meta_x)[0, 1])
+        proba = float(_predict_matrix(df_input.to_numpy(dtype=float))[0])
         threshold = float(state.model.get("optimal_threshold", 0.5))
         pred = int(proba >= threshold)
 
@@ -371,9 +410,15 @@ async def predict(transaction: TransactionFeatures, request: Request, x_api_key:
 
 
 @app.get("/explain/{index}", tags=["inference"])
-async def explain(index: int) -> Dict[str, Any]:
-    """Return a SHAP explanation using the same model-bundle inference path as /predict."""
+async def explain(
+    index: int,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Return a SHAP explanation using the same protected inference path as /predict."""
     _require_model()
+    _require_api_key(x_api_key)
+    _check_rate_limit(request)
     if state.data is None:
         raise HTTPException(status_code=503, detail="Dashboard dataset is unavailable.")
     if state.explainer is None:
@@ -393,7 +438,8 @@ async def explain(index: int) -> Dict[str, Any]:
         probabilities, predictions = _predict_raw(raw_row)
         return {
             "index": index,
-            "features": list(engineered.columns),
+            "feature_names": list(engineered.columns),
+            "features": list(engineered.columns),  # Backward-compatible field used by the dashboard/tests.
             "shap_values": sv[0].tolist(),
             "expected_value": expected_value,
             "prediction": int(predictions[0]),
@@ -407,40 +453,125 @@ async def explain(index: int) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket — live transaction stream
+# WebSocket — sample transaction replay (demo only)
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
-    """Stream dashboard transactions through the same bundle used by /predict."""
+    """
+    Replay labelled sample rows through the research model (demo only).
+
+    The client controls start/stop and replay interval using JSON messages.
+    This endpoint is not connected to a live payment network or event feed.
+    """
+    origin = websocket.headers.get("origin")
+    if origin and ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008, reason="Origin is not allowed.")
+        return
+
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    active_connections = _ws_connections.get(client_ip, 0)
+    if active_connections >= MAX_WS_CONNECTIONS_PER_IP:
+        await websocket.close(code=1013, reason="Too many replay connections.")
+        return
+
+    production_mode = os.environ.get("APP_ENV", "development").strip().lower() in {"production", "prod"}
+    if production_mode and not API_KEY:
+        await websocket.close(code=1011, reason="API authentication is not configured.")
+        return
+    provided_key = websocket.headers.get("x-api-key", "")
+    if API_KEY and not hmac.compare_digest(provided_key, API_KEY):
+        await websocket.close(code=1008, reason="Invalid or missing API key.")
+        return
+
+    _ws_connections[client_ip] = active_connections + 1
     await websocket.accept()
-    logger.info("WebSocket client connected.")
+    logger.info("WebSocket sample replay client connected.")
+    running = False
+    interval_seconds = 1.0
+
     try:
         while True:
-            if state.model is None or state.data is None:
-                await websocket.send_json({"error": "Service is not ready", "model_loaded": False})
-                await asyncio.sleep(2)
-                continue
             try:
-                sample = state.data.sample(1, random_state=None)
-                probabilities, predictions = _predict_raw(sample)
-                payload: Dict[str, Any] = {
-                    "transaction_index": int(sample.index[0]),
-                    "fraud_probability": float(probabilities[0]),
-                    "prediction": int(predictions[0]),
-                    "features": {
-                        col: float(sample[col].iloc[0])
-                        for col in [f"V{i}" for i in range(1, 6)]
-                    },
-                }
-                if "Class" in sample.columns:
-                    payload["true_label"] = int(sample["Class"].iloc[0])
-                await websocket.send_json(payload)
-            except Exception:
-                logger.exception("Stream error")
-                await websocket.send_json({"error": "Prediction failed"})
-            await asyncio.sleep(1)
+                message = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=interval_seconds if running else None,
+                )
+                if not isinstance(message, dict):
+                    await websocket.send_json({"error": "Control message must be a JSON object."})
+                    continue
+
+                action = str(message.get("action", "")).strip().lower()
+                if action in {"start", "speed"}:
+                    requested_interval = float(message.get("interval", interval_seconds))
+                    if not np.isfinite(requested_interval):
+                        requested_interval = 1.0
+                    interval_seconds = float(np.clip(requested_interval, 0.1, 10.0))
+                    running = True
+                elif action == "stop":
+                    running = False
+                else:
+                    await websocket.send_json({"error": "Supported actions are start, stop and speed."})
+            except asyncio.TimeoutError:
+                if not running:
+                    continue
+                if state.model is None or state.data is None:
+                    await websocket.send_json({"error": "Service is not ready", "model_loaded": False})
+                    continue
+
+                try:
+                    sample = state.data.sample(1, random_state=None)
+                    original = sample.iloc[0]
+                    feature_columns = [f"V{i}" for i in range(1, 29)] + ["Amount", "Time"]
+                    raw_features = {
+                        name: float(original[name])
+                        for name in feature_columns
+                        if name in sample.columns
+                    }
+                    started = time.perf_counter()
+                    probabilities, predictions = _predict_raw(sample)
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    probability = float(probabilities[0])
+                    prediction = int(predictions[0])
+                    actual = int(original["Class"]) if "Class" in sample.columns else None
+                    threshold = float(state.model.get("optimal_threshold", 0.5))
+                    risk_level = (
+                        "High" if prediction == 1
+                        else "Medium" if probability >= threshold * 0.5
+                        else "Low"
+                    )
+                    payload: Dict[str, Any] = {
+                        "index": int(sample.index[0]),
+                        "transaction_index": int(sample.index[0]),
+                        "timestamp": time.time(),
+                        "features": raw_features,
+                        "fraud_probability": probability,
+                        "probability": probability,
+                        "prediction": prediction,
+                        "actual": actual,
+                        "true_label": actual,
+                        "threshold": threshold,
+                        "risk_level": risk_level,
+                        "latency_ms": float(latency_ms),
+                        "model_version": str(state.model.get("model_version", "unknown")),
+                        "data_source": "synthetic_dashboard_data" if not os.path.exists(DATA_PATH) else "local_csv_replay",
+                        "model_training_source": (
+                            "synthetic_demo"
+                            if "synthetic" in str(state.model.get("training_note", "")).lower()
+                            else "research_or_external_dataset"
+                        ),
+                    }
+                    await websocket.send_json(payload)
+                except Exception:
+                    logger.exception("Sample replay prediction failed.")
+                    await websocket.send_json({"error": "Prediction failed"})
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected.")
+        logger.info("WebSocket sample replay client disconnected.")
     except Exception:
-        logger.exception("WebSocket stream crashed.")
+        logger.exception("WebSocket sample replay crashed.")
+    finally:
+        remaining = _ws_connections.get(client_ip, 1) - 1
+        if remaining > 0:
+            _ws_connections[client_ip] = remaining
+        else:
+            _ws_connections.pop(client_ip, None)

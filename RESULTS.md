@@ -1,11 +1,21 @@
-# Experimental Results: Ensemble ML for Credit Card Fraud Detection
+# Archived Experimental Results: Ensemble ML for Credit Card Fraud Detection
 
 > **Document type:** Experimental Results Report  
 > **Project:** Final Year Computer Science Project  
 > **Dataset:** Kaggle Credit Card Fraud Detection (ULB)  
-> **Version:** 2.0 — Comprehensive Results  
+> **Version:** 2.0 — Historical snapshot (archived)  
 
 ---
+
+> **IMPORTANT — HISTORICAL SNAPSHOT, NOT CURRENT PERFORMANCE.** The values below were recorded in an earlier v2.0 experiment. The current research runner has since been revised to move scaling and SMOTE inside every CV training fold, use a chronological 70/15/15 train/validation/test split by default, and select the decision threshold on validation data only. The original metrics.json, exact model bundle and test predictions are not present in this repository, so the historical numbers cannot be independently reproduced from this checkout. Do not use them in a CV, paper, presentation or production claim as the result of the revised pipeline. Re-run the current experiment and replace this archive with the generated evidence.
+
+To generate current evidence, place the Kaggle ULB creditcard.csv file in data/ and run:
+
+```bash
+python src/run_experiment.py --data-path data/creditcard.csv --output-dir results/ --fig-dir figures/ --split-strategy temporal
+```
+
+Only the resulting results/metrics.json and corresponding model/report artifacts should be cited as current output.
 
 ## Table of Contents
 
@@ -27,11 +37,11 @@
 
 ## 1. Executive Summary
 
-This project presents a stacking ensemble system for credit card fraud detection that achieves AUPRC 0.903 on the Kaggle Credit Card Fraud Detection benchmark, outperforming the individual base learners evaluated in this study. The three-layer architecture — Logistic Regression, Random Forest, and XGBoost as base learners, with a Logistic Regression meta-learner — achieves **AUPRC 0.903**, **F1 0.881**, and **MCC 0.884**, representing consistent improvements of **1.3–14.2 AUPRC points** over all individual base learners tested.
+This document preserves the historical v2.0 result snapshot for auditability. It records a previous stacking experiment using Logistic Regression, Random Forest and XGBoost with a Logistic Regression meta-learner. The reported historical headline figures were AUPRC 0.903, F1 0.881 and MCC 0.884.
 
-The pipeline is fully leakage-free (SMOTE applied strictly inside each CV fold), statistically validated across 5 stability runs (95% CI: AUPRC [0.899, 0.907]), and deployable as a Streamlit demonstration and a hardened FastAPI inference service. All results are reproducible to numerical precision via deterministic seeding and saved model checkpoints.
+These figures are **not a verified result for the revised experiment runner**. The previous code path contained preprocessing and resampling before hyperparameter-search folds, and the repository does not include the original metrics artifact, exact model bundle or per-row predictions needed to independently reproduce the numbers. The current runner has been corrected; a new benchmark run is required before any updated performance statement is made.
 
----
+All tables and interpretations below should therefore be read as an archived record of the former v2.0 experiment, not as proof of current performance, statistical significance, inference latency or production readiness.
 
 ## 2. Dataset Statistics
 

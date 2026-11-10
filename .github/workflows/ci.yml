@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "master", "develop" ]
+    branches: [ "main", "master", "develop", "workbench/**" ]
   pull_request:
     branches: [ "main", "master" ]
 
@@ -47,7 +47,7 @@ jobs:
 
       # ── 8. pytest (unit + integration, no live server required) ─────────────
       - name: Run pytest
-        run: pytest scripts/test_backend.py -v --tb=short
+        run: pytest scripts/test_backend.py scripts/test_research_pipeline.py scripts/test_model_fetch.py -v --tb=short
 
   lint:
     name: Lint
@@ -73,3 +73,27 @@ jobs:
           # Warn on style issues (do not fail the build)
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 \
             --statistics --exclude=.venv,node_modules,dashboard/frontend
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard/frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build

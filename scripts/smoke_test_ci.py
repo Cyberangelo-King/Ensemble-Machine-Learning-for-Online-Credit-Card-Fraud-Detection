@@ -1,6 +1,15 @@
 """CI smoke test for the FastAPI service with lifespan/startup enabled."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Running "python scripts/smoke_test_ci.py" puts scripts/ on sys.path.
+# Add the repository root so dashboard.backend is importable in CI and locally.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from fastapi.testclient import TestClient
 
 from dashboard.backend.main import app

@@ -127,8 +127,9 @@ def generate_synthetic_data(
     import numpy as np
     amount_log_legit = np.log1p(amount_legit)
     amount_log_fraud = np.log1p(amount_fraud)
-    hour_legit = (time_legit % 86400) / 3600
-    hour_fraud = (time_fraud % 86400) / 3600
+    # Time is elapsed seconds from the dataset's first transaction, not clock time.
+    hour_legit = time_legit / 3600.0
+    hour_fraud = time_fraud / 3600.0
 
     # ── Combine ───────────────────────────────────────────────────────────
     X_legit_full = np.column_stack([X_legit, amount_log_legit, hour_legit])
@@ -170,6 +171,7 @@ def train_demo_model(
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.model_selection import StratifiedKFold
     from sklearn.preprocessing import StandardScaler
+    from sklearn.base import clone
     from xgboost import XGBClassifier
     import numpy as np
 
@@ -230,7 +232,7 @@ def train_demo_model(
     )
     # Refit on full res data for final model
     xgb_final = XGBClassifier(
-        n_estimators=xgb.best_iteration or 100,
+        n_estimators=(int(xgb.best_iteration) + 1) if xgb.best_iteration is not None else 100,
         max_depth=5, learning_rate=0.1, scale_pos_weight=20,
         n_jobs=n_jobs, random_state=random_state,
         verbosity=0, use_label_encoder=False, eval_metric="aucpr",
@@ -264,22 +266,23 @@ def train_demo_model(
 
         try:
             X_fold_res, y_fold_res = fold_smote.fit_resample(X_fold_tr_sc, y_fold_tr)
-        except ValueError as e:
-            # Graceful fallback: use unaugmented fold
-            print(f"\n  [WARN] SMOTE failed on fold {fold_i}: {e}. Using unaugmented fold.")
-            X_fold_res, y_fold_res = X_fold_tr_sc, y_fold_tr
+        except ValueError as exc:
+            raise RuntimeError(
+                f"SMOTE failed on OOF fold {fold_i}; refusing to silently change the "
+                "training protocol for only one fold."
+            ) from exc
 
-        for j, clf in enumerate([lr.__class__, rf.__class__, xgb_final.__class__]):
-            clf_fold = [lr, rf, xgb_final][j].__class__(
-                **{k: v for k, v in [lr, rf, xgb_final][j].get_params().items()
-                   if k not in ["early_stopping_rounds", "eval_metric"]}
-            ) if j == 2 else type([lr, rf, xgb_final][j])(**[lr, rf, xgb_final][j].get_params())
+        for j, fitted_base_learner in enumerate([lr, rf, xgb_final]):
+            # clone() returns an unfitted estimator with the same hyperparameters.
+            # Never replace a failed fold prediction with an in-sample prediction.
+            clf_fold = clone(fitted_base_learner)
             try:
                 clf_fold.fit(X_fold_res, y_fold_res)
                 meta_X[val_idx, j] = clf_fold.predict_proba(X_fold_val_sc)[:, 1]
-            except Exception:
-                # Fallback: use full-data model predictions
-                meta_X[val_idx, j] = [lr_prob, rf_prob, xgb_prob][j][val_idx]
+            except Exception as exc:
+                raise RuntimeError(
+                    f"OOF fold {fold_i}, learner {j} failed; refusing an in-sample fallback."
+                ) from exc
 
     _ok("OOF meta-features generated")
 
@@ -300,15 +303,13 @@ def evaluate_model(
     base_learners: List[Any],
     meta_learner: Any,
     scaler: Any,
-    X_test: Any,
-    y_test: Any,
+    X_eval: Any,
+    y_eval: Any,
+    decision_threshold: Any = None,
 ) -> Dict[str, Any]:
     """
-    Compute all evaluation metrics on the test set.
-
-    Returns
-    -------
-    metrics_bundle : dict compatible with app.py and dashboard/backend/main.py
+    Evaluate on one partition. Pass decision_threshold=None only for validation
+    threshold selection; the final test call must pass that frozen value.
     """
     import numpy as np
     from sklearn.metrics import (
@@ -317,46 +318,46 @@ def evaluate_model(
         confusion_matrix, precision_recall_curve,
     )
 
-    X_test_sc = scaler.transform(X_test)
-    meta_X_test = np.column_stack([
-        clf.predict_proba(X_test_sc)[:, 1] for clf in base_learners
+    X_eval_scaled = scaler.transform(X_eval)
+    meta_features = np.column_stack([
+        learner.predict_proba(X_eval_scaled)[:, 1] for learner in base_learners
     ]).astype(np.float32)
-    y_prob = meta_learner.predict_proba(meta_X_test)[:, 1]
+    probabilities = meta_learner.predict_proba(meta_features)[:, 1]
 
-    # Default threshold
-    y_pred_05 = (y_prob >= 0.5).astype(int)
-    auprc = float(average_precision_score(y_test, y_prob))
-    roc_auc = float(roc_auc_score(y_test, y_prob))
+    selected_threshold = decision_threshold
+    if selected_threshold is None:
+        precisions, recalls, thresholds = precision_recall_curve(y_eval, probabilities)
+        if len(thresholds) == 0:
+            raise ValueError("Cannot select a threshold: validation partition has no score thresholds.")
+        f1_values = np.divide(
+            2 * precisions[:-1] * recalls[:-1],
+            precisions[:-1] + recalls[:-1],
+            out=np.zeros_like(precisions[:-1], dtype=float),
+            where=(precisions[:-1] + recalls[:-1]) > 0,
+        )
+        selected_threshold = float(thresholds[int(np.argmax(f1_values))])
 
-    # Optimal threshold (F1-maximising)
-    precisions, recalls, thresholds = precision_recall_curve(y_test, y_prob)
-    f1s = np.where(
-        (precisions + recalls) == 0, 0.0,
-        2 * precisions * recalls / (precisions + recalls + 1e-9)
-    )
-    best_idx = int(np.argmax(f1s[:-1]))
-    opt_thresh = float(thresholds[best_idx])
-    y_pred_opt = (y_prob >= opt_thresh).astype(int)
-
-    def _metrics(y_pred: Any) -> Dict[str, float]:
-        tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+    def _metrics(threshold: float) -> Dict[str, float]:
+        predictions = (probabilities >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_eval, predictions, labels=[0, 1]).ravel()
         return {
-            "AUPRC": auprc,
-            "ROC_AUC": roc_auc,
-            "F1": float(f1_score(y_test, y_pred, zero_division=0)),
-            "MCC": float(matthews_corrcoef(y_test, y_pred)),
-            "Precision": float(precision_score(y_test, y_pred, zero_division=0)),
-            "Recall": float(recall_score(y_test, y_pred, zero_division=0)),
+            "AUPRC": float(average_precision_score(y_eval, probabilities)),
+            "ROC_AUC": float(roc_auc_score(y_eval, probabilities)),
+            "F1": float(f1_score(y_eval, predictions, zero_division=0)),
+            "MCC": float(matthews_corrcoef(y_eval, predictions)),
+            "Precision": float(precision_score(y_eval, predictions, zero_division=0)),
+            "Recall": float(recall_score(y_eval, predictions, zero_division=0)),
             "TP": int(tp), "FP": int(fp), "TN": int(tn), "FN": int(fn),
         }
 
     return {
-        "threshold_0.5": _metrics(y_pred_05),
-        "threshold_optimal": _metrics(y_pred_opt),
-        "optimal_threshold_value": opt_thresh,
-        "note": "Demo model trained on synthetic data — metrics are approximate",
+        "report_schema_version": 1,
+        "benchmark_status": "synthetic_demo",
+        "threshold_0.5": _metrics(0.5),
+        "threshold_optimal": _metrics(float(selected_threshold)),
+        "optimal_threshold_value": float(selected_threshold),
+        "note": "Synthetic demonstration data only; these scores are not benchmark evidence.",
     }
-
 
 # ===========================================================================
 # CLI
@@ -416,14 +417,22 @@ def main() -> None:
     X, y = generate_synthetic_data(args.n_samples, args.fraud_rate, args.random_state)
     _ok(f"Dataset shape: {X.shape} | Fraud: {int(y.sum()):,} ({y.mean():.2%})")
 
-    # ── Train / test split ─────────────────────────────────────────────────
+    # ── Train / validation / test split ────────────────────────────────────
     _section("3. Splitting Data")
     from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=args.random_state
+    X_development, X_test, y_development, y_test = train_test_split(
+        X, y, test_size=0.15, stratify=y, random_state=args.random_state
     )
-    _ok(f"Train: {X_train.shape} | Test: {X_test.shape}")
-    _ok(f"Train fraud: {int(y_train.sum()):,} | Test fraud: {int(y_test.sum()):,}")
+    X_train, X_validation, y_train, y_validation = train_test_split(
+        X_development, y_development,
+        test_size=(0.15 / 0.85), stratify=y_development,
+        random_state=args.random_state,
+    )
+    _ok(f"Train: {X_train.shape} | Validation: {X_validation.shape} | Test: {X_test.shape}")
+    _ok(
+        f"Fraud counts — train: {int(y_train.sum()):,}; "
+        f"validation: {int(y_validation.sum()):,}; test: {int(y_test.sum()):,}"
+    )
 
     # ── Validate fraud sample count ────────────────────────────────────────
     if y_train.sum() < 6:
@@ -440,9 +449,25 @@ def main() -> None:
         X_train, y_train, args.n_jobs, args.random_state
     )
 
-    # ── Evaluate ───────────────────────────────────────────────────────────
-    _section("5. Evaluating on Test Set")
-    metrics = evaluate_model(base_learners, meta_learner, scaler, X_test, y_test)
+    # ── Select threshold on validation, then evaluate test once ─────────────
+    _section("5. Validation threshold selection")
+    validation_metrics = evaluate_model(
+        base_learners, meta_learner, scaler, X_validation, y_validation,
+        decision_threshold=None,
+    )
+    selected_threshold = validation_metrics["optimal_threshold_value"]
+    _ok(f"Validation-selected threshold: {selected_threshold:.6f}")
+
+    _section("6. Final test evaluation")
+    metrics = evaluate_model(
+        base_learners, meta_learner, scaler, X_test, y_test,
+        decision_threshold=selected_threshold,
+    )
+    metrics["validation_threshold_metrics"] = validation_metrics["threshold_optimal"]
+    metrics["threshold_selection"] = {
+        "method": "F1 maximisation on validation partition",
+        "test_set_used_for_threshold_selection": False,
+    }
     m_opt = metrics["threshold_optimal"]
     m_05 = metrics["threshold_0.5"]
     print(f"\n  {'Metric':<12} {'@0.5':>8} {'@Optimal':>10}")
@@ -466,7 +491,15 @@ def main() -> None:
         "scaler": scaler,
         "feature_names": feature_names,
         "optimal_threshold": metrics["optimal_threshold_value"],
-        "training_note": "Demo model trained on synthetic data",
+        "preprocessing_in_estimators": False,
+        "model_schema_version": "1.1",
+        "feature_schema_version": "ulb-pca-elapsed-hours-v1",
+        "model_version": "synthetic-demo-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        "training_note": "Synthetic demonstration data only; not the Kaggle benchmark.",
+        "evaluation_protocol": {
+            "threshold_selected_on": "held-out validation partition",
+            "test_set_used_for_threshold_selection": False,
+        },
     }
 
     model_path = output_dir / "stacking_model.pkl"
@@ -504,6 +537,7 @@ def main() -> None:
     elapsed = time.perf_counter() - t_start
     _section("Complete!")
     print(f"  Total time : {elapsed:.1f}s")
+    print("  DATA STATUS: synthetic demonstration only; do not report these metrics as benchmark results.")
     print(f"  Model path : {model_path.resolve()}")
     print(f"  Metrics    : {metrics_path.resolve()}")
     print(f"\n  Launch dashboard:")

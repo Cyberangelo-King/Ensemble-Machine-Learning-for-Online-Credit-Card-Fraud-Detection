@@ -12,7 +12,8 @@ import axios from 'axios';
 
 // Environment-aware URLs
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/stream';
+const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WS_URL = WS_BASE.replace(/\/ws\/stream\/?$/, '').replace(/\/$/, '') + '/ws/stream';
 
 const App = () => {
   const [darkMode, setDarkMode] = useState(true);
@@ -62,10 +63,25 @@ const App = () => {
       ws.current.send(JSON.stringify({ action: 'start', interval: 1 / speed }));
     };
     ws.current.onmessage = (event) => {
-      const tx = JSON.parse(event.data);
-      setTransactions(prev => [tx, ...prev].slice(0, 200)); // Increased for auditability
+      const message = JSON.parse(event.data);
+      if (message.error) {
+        console.warn("Replay service:", message.error);
+        return;
+      }
+      const tx = {
+        ...message,
+        index: message.index ?? message.transaction_index,
+        actual: message.actual ?? message.true_label ?? null,
+        probability: message.probability ?? message.fraud_probability,
+        timestamp: message.timestamp ?? Date.now() / 1000,
+        features: message.features ?? {},
+        risk_level: message.risk_level ?? "Unknown",
+        latency_ms: Number(message.latency_ms ?? 0),
+      };
+      setTransactions(prev => [tx, ...prev].slice(0, 200));
       updateMetrics(tx);
     };
+    ws.current.onerror = () => setStreaming(false);
     ws.current.onclose = () => setStreaming(false);
   };
 
@@ -77,10 +93,11 @@ const App = () => {
 
   const updateMetrics = (tx) => {
     setMetrics(prev => {
-      const isTP = tx.prediction === 1 && tx.actual === 1;
-      const isFP = tx.prediction === 1 && tx.actual === 0;
-      const isTN = tx.prediction === 0 && tx.actual === 0;
-      const isFN = tx.prediction === 0 && tx.actual === 1;
+      const hasGroundTruth = tx.actual === 0 || tx.actual === 1;
+      const isTP = hasGroundTruth && tx.prediction === 1 && tx.actual === 1;
+      const isFP = hasGroundTruth && tx.prediction === 1 && tx.actual === 0;
+      const isTN = hasGroundTruth && tx.prediction === 0 && tx.actual === 0;
+      const isFN = hasGroundTruth && tx.prediction === 0 && tx.actual === 1;
 
       return {
         ...prev,
@@ -119,7 +136,7 @@ const App = () => {
           </div>
           <div>
             <h1 className="text-xl font-black tracking-tight">FraudGuard AI</h1>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Real-time Stacking Ensemble Monitoring</p>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Research Model · Simulated Transaction Stream</p>
           </div>
         </div>
 
@@ -160,7 +177,7 @@ const App = () => {
         <div className="w-80 flex flex-col gap-6 shrink-0">
           <section className="bg-white dark:bg-slate-900 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-xl shadow-slate-200/50 dark:shadow-none">
             <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5 flex items-center gap-2">
-              <Activity size={14} className="text-indigo-500" /> Live Accuracy
+              <Activity size={14} className="text-indigo-500" /> Replay Metrics
             </h3>
             <div className="grid grid-cols-2 gap-4">
               <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800">
@@ -214,11 +231,11 @@ const App = () => {
           <section className="flex-1 bg-white dark:bg-slate-900 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-xl shadow-slate-200/50 dark:shadow-none flex flex-col overflow-hidden">
             <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/30">
               <h3 className="font-black text-sm tracking-tight flex items-center gap-2">
-                <Clock size={16} className="text-indigo-500" /> Live Transaction Feed
+                <Clock size={16} className="text-indigo-500" /> Simulated Transaction Feed
               </h3>
               <div className="flex gap-2">
                 <span className={`flex items-center gap-1.5 text-[10px] font-black px-3 py-1.5 rounded-full uppercase tracking-widest ${streaming ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500'}`}>
-                  <div className={`w-2 h-2 rounded-full ${streaming ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} /> {streaming ? 'System Live' : 'System Standby'}
+                  <div className={`w-2 h-2 rounded-full ${streaming ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} /> {streaming ? 'Replay Active' : 'Replay Stopped'}
                 </span>
               </div>
             </div>
@@ -270,7 +287,7 @@ const App = () => {
                       </td>
                       <td className="px-6 py-4 text-center">
                          <span className={`text-[10px] font-black tracking-widest ${tx.actual === 1 ? 'text-red-500 bg-red-100/50 px-2 py-0.5 rounded' : 'text-slate-400'}`}>
-                           {tx.actual === 1 ? 'FRAUD' : 'LEGIT'}
+                           {tx.actual === 1 ? 'FRAUD' : tx.actual === 0 ? 'LEGIT' : 'UNKNOWN'}
                          </span>
                       </td>
                       <td className="px-6 py-4 text-right text-[10px] font-mono font-bold text-slate-400 italic">
@@ -318,7 +335,7 @@ const App = () => {
                   <div>
                     <h4 className="text-[10px] font-black text-slate-500 mb-5 uppercase tracking-[0.2em] flex justify-between">
                       <span>SHAP Explainability</span>
-                      <span className="text-indigo-500">Base: XGBoost</span>
+                      <span className="text-indigo-500">Base: Ensemble</span>
                     </h4>
                     {shapData ? (
                       <div className="space-y-4">
@@ -355,13 +372,13 @@ const App = () => {
                              <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" />
                            </div>
                         </div>
-                        <p className="text-[10px] font-black uppercase tracking-[0.2em]">Computing SHAP...</p>
+                        <p className="text-[10px] font-black uppercase tracking-[0.2em]">Computing local explanation...</p>
                       </div>
                     )}
                   </div>
 
                   <div className="bg-slate-900 rounded-[1.5rem] p-6 text-white shadow-xl shadow-slate-900/20">
-                    <h4 className="text-[10px] font-black mb-4 uppercase tracking-[0.2em] opacity-40">Forensic Features</h4>
+                    <h4 className="text-[10px] font-black mb-4 uppercase tracking-[0.2em] opacity-40">Sample Transaction Features</h4>
                     <div className="grid grid-cols-2 gap-x-6 gap-y-4">
                        {['V17', 'V14', 'V12', 'V10', 'Amount', 'Time'].map(f => (
                          <div key={f} className="flex flex-col">
@@ -380,7 +397,7 @@ const App = () => {
                     <Search size={32} className="opacity-20" />
                   </div>
                   <p className="font-black text-sm uppercase tracking-widest text-slate-500 mb-2">No Transaction Selected</p>
-                  <p className="text-[10px] font-bold opacity-50 leading-relaxed">Select a transaction from the live feed to perform deep forensic analysis and SHAP explanation.</p>
+                  <p className="text-[10px] font-bold opacity-50 leading-relaxed">Select a transaction from the simulated feed to perform deep forensic analysis and SHAP explanation.</p>
                 </div>
               )}
             </div>

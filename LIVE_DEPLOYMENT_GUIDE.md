@@ -1,42 +1,28 @@
-# 🌐 Live Deployment Guide
+# Demo Deployment Guide
 
-This guide explains how to deploy the **FraudGuard AI** Command Center to the web so you can share a live link with Dr. Ajulo.
+This repository can be published as a **research demonstration** with a FastAPI service and a static React dashboard. It is not connected to a bank, issuer, acquirer, payment processor or live card network.
 
-## Option 1: One-Click Deployment (Recommended for Render.com)
+## Recommended: Render Blueprint
 
-Render is great because it can host both the Python backend (with WebSockets) and the React frontend.
+1. Push the `workbench/model-audit-hardening-2026-11` branch to GitHub for review. Keep the PR unmerged until the research changes and generated artifacts have been reviewed.
+2. Upload the intended model bundle to a trusted HTTPS artifact store.
+3. Calculate the model digest:
+   ```bash
+   sha256sum results/stacking_model.pkl
+   ```
+4. In Render, select **New + → Blueprint** and connect this repository.
+5. Supply `MODEL_URL` and `MODEL_SHA256` when Render requests the unsynchronised environment values.
+6. Confirm that the backend health endpoint returns `status=ok` and `model_loaded=true`.
+7. Open the static frontend and start the simulated transaction replay.
 
-1.  **Push to GitHub:**
-    Make sure all your changes (including the new `dashboard/` folder and `render.yaml`) are pushed to a GitHub repository.
-2.  **Connect to Render:**
-    - Go to [dashboard.render.com](https://dashboard.render.com).
-    - Click **"New +"** -> **"Blueprint"**.
-    - Connect your GitHub repository.
-3.  **Deploy:**
-    Render will read the `render.yaml` file and automatically:
-    - Set up the Python environment.
-    - Train the model (so it's ready for the dashboard).
-    - Start the FastAPI backend.
-    - Build and host the React frontend.
+The Blueprint's frontend is a static Vite build. The previous Node 18 service/start command has been removed; this frontend uses Vite 8 and a current Node runtime.
 
-## Option 2: Split Deployment (Fastest Frontend Performance)
+## Local demonstration
 
-If you prefer using **Netlify** or **Vercel** for the frontend:
+Follow [DEPLOYMENT.md](DEPLOYMENT.md) for the full local setup, environment variables, synthetic demo generation, API checks, and benchmark instructions.
 
-### 1. Backend (FastAPI on Render/Railway)
-- Deploy the root folder to Render as a **Web Service**.
-- Build Command: `pip install -r requirements.txt && python scripts/generate_synthetic_data.py && python src/run_experiment.py`
-- Start Command: `uvicorn dashboard.backend.main:app --host 0.0.0.0 --port $PORT`
-- **Copy the URL** (e.g., `https://fraud-api.onrender.com`).
+## Security boundary
 
-### 2. Frontend (Netlify)
-- Connect your GitHub repo to Netlify.
-- Set the **Base Directory** to `dashboard/frontend`.
-- Set the **Build Command** to `npm run build`.
-- Set the **Publish Directory** to `dashboard/frontend/dist`.
-- **CRITICAL:** Add Environment Variables in the Netlify UI:
-    - `VITE_API_URL`: `https://your-backend-url.onrender.com`
-    - `VITE_WS_URL`: `wss://your-backend-url.onrender.com/ws/stream` (Note the `wss://` for secure WebSockets).
+The public Blueprint uses `APP_ENV=demo`. Do not upload customer information, cardholder data, payment credentials or private transaction streams. Do not place secrets in `VITE_*` frontend variables. The browser app does not yet implement end-user authentication or a secure API proxy. This deployment must not be described as production-ready.
 
-## Important Presentation Note
-Free-tier hosting (like Render's free tier) often "sleeps" after inactivity. If you're presenting to Dr. Ajulo, **open the link 2 minutes before the presentation** to ensure the backend has "woken up."
+The simulated WebSocket feed replays sample rows from the backend's local dataset or generated synthetic rows. It is not a real-time fraud detection integration.

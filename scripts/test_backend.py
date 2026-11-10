@@ -4,7 +4,7 @@ pytest test suite for the Fraud Detection FastAPI backend.
 
 Usage
 -----
-Without a live server (default — uses httpx.AsyncClient with ASGI transport):
+Without a live server (default — uses FastAPI TestClient with ASGI lifespan):
     pytest scripts/test_backend.py -v
 
 Against a live server (set BASE_URL env var):
@@ -17,8 +17,23 @@ WebSocket tests require the optional `websocket-client` package:
 from __future__ import annotations
 
 import os
+import sys
 import importlib
+from pathlib import Path
+
 import pytest
+import pandas as pd
+import numpy as np
+from fastapi import HTTPException
+from starlette.websockets import WebSocketDisconnect
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dashboard.backend import main as backend_main  # noqa: E402
+from dashboard.backend.main import app  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Optional imports
@@ -82,30 +97,44 @@ def sync_client():
     Return a synchronous test client.
 
     - If BASE_URL env var is set: use httpx against a live server.
-    - Otherwise: mount the ASGI app directly (no live server needed).
+    - Otherwise: use Starlette's TestClient and run the FastAPI lifespan.
     """
-    import httpx
-
     if USE_LIVE_SERVER:
+        import httpx
         client = httpx.Client(base_url=LIVE_BASE_URL, timeout=10.0)
         yield client
         client.close()
     else:
-        # Import the FastAPI app.  If artefacts are missing the startup lifespan
-        # will log warnings and set state to None — endpoints that require the
-        # model will return 503, which we handle gracefully in the tests below.
-        try:
-            from dashboard.backend.main import app
-            transport = httpx.ASGITransport(app=app)
-            client = httpx.Client(
-                transport=transport,
-                base_url="http://testserver",
-                timeout=10.0,
-            )
+        with TestClient(app) as client:
             yield client
-            client.close()
-        except ImportError as exc:
-            pytest.skip(f"Could not import backend app: {exc}")
+
+
+# =============================================================================
+# Authentication helpers
+# =============================================================================
+
+class TestAuthentication:
+    def test_production_fails_closed_without_api_key(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "")
+        monkeypatch.setenv("APP_ENV", "production")
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key(None)
+        assert exc.value.status_code == 503
+
+    def test_configured_api_key_rejects_missing_or_wrong_value(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "test-secret")
+        monkeypatch.setenv("APP_ENV", "development")
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key(None)
+        assert exc.value.status_code == 401
+        with pytest.raises(HTTPException) as exc:
+            backend_main._require_api_key("incorrect")
+        assert exc.value.status_code == 401
+
+    def test_configured_api_key_accepts_matching_value(self, monkeypatch):
+        monkeypatch.setattr(backend_main, "API_KEY", "test-secret")
+        monkeypatch.setenv("APP_ENV", "development")
+        backend_main._require_api_key("test-secret")
 
 
 # =============================================================================
@@ -114,7 +143,7 @@ def sync_client():
 
 class TestHealth:
     def test_health_returns_200(self, sync_client):
-        """GET /health must return HTTP 200 regardless of model state."""
+        """GET /health reports ready (200) or not-ready (503) model state."""
         response = sync_client.get("/health")
         assert response.status_code in (200, 503), (
             f"Expected 200 from /health, got {response.status_code}: {response.text}"
@@ -124,6 +153,8 @@ class TestHealth:
         """Response body must have 'status' and 'model_loaded' keys."""
         response = sync_client.get("/health")
         body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert "status" in body, "Missing 'status' key in /health response"
         assert "model_loaded" in body, "Missing 'model_loaded' key in /health response"
         assert "readiness" in body
@@ -131,12 +162,18 @@ class TestHealth:
 
     def test_health_status_value(self, sync_client):
         """'status' field must equal 'ok'."""
-        body = sync_client.get("/health").json()
+        response = sync_client.get("/health")
+        body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert body["status"] in ("ok", "unready")
 
     def test_health_model_loaded_is_bool(self, sync_client):
         """'model_loaded' must be a boolean."""
-        body = sync_client.get("/health").json()
+        response = sync_client.get("/health")
+        body = response.json()
+        if response.status_code == 503:
+            body = body.get("detail", body)
         assert isinstance(body["model_loaded"], bool)
 
 
@@ -229,7 +266,7 @@ class TestExplain:
         if response.status_code != 200:
             pytest.skip("Explain endpoint not available (no model/data).")
         body = response.json()
-        for key in ("index", "features", "shap_values", "expected_value"):
+        for key in ("index", "features", "feature_names", "shap_values", "expected_value"):
             assert key in body, f"Missing key '{key}' in /explain/0 response"
 
     def test_explain_shap_values_length(self, sync_client):
@@ -259,6 +296,58 @@ class TestExplain:
         assert response.status_code in (404, 422, 503), (
             f"Expected 404/422/503 for /explain/-1, got {response.status_code}"
         )
+
+
+# =============================================================================
+# In-process WebSocket sample replay
+# =============================================================================
+
+class TestWebSocketDemoReplay:
+    def test_websocket_rejects_unapproved_browser_origin(self, sync_client, monkeypatch):
+        monkeypatch.setattr(backend_main, "ALLOWED_ORIGINS", ["https://trusted.example"])
+        with pytest.raises(WebSocketDisconnect):
+            with sync_client.websocket_connect(
+                "/ws/stream",
+                headers={"origin": "https://untrusted.example"},
+            ):
+                pass
+
+    def test_start_message_returns_frontend_compatible_sample(self, sync_client, monkeypatch):
+        """The React replay contract receives every field it renders."""
+        rows = 20
+        sample = pd.DataFrame({
+            **{f"V{i}": np.linspace(-1, 1, rows) for i in range(1, 29)},
+            "Amount": np.linspace(1, 200, rows),
+            "Time": np.arange(rows, dtype=float) * 3600,
+            "Class": np.tile([0, 1], rows // 2),
+        })
+        monkeypatch.setattr(backend_main.state, "model", {
+            "optimal_threshold": 0.5,
+            "model_version": "test-websocket-model",
+        })
+        monkeypatch.setattr(backend_main.state, "data", sample)
+        monkeypatch.setattr(backend_main, "API_KEY", "")
+        monkeypatch.setattr(backend_main, "ALLOWED_ORIGINS", ["https://trusted.example"])
+        monkeypatch.setattr(
+            backend_main,
+            "_predict_raw",
+            lambda frame: (np.array([0.85]), np.array([1])),
+        )
+
+        with sync_client.websocket_connect(
+            "/ws/stream", headers={"origin": "https://trusted.example"}
+        ) as socket:
+            socket.send_json({"action": "start", "interval": 0.1})
+            message = socket.receive_json()
+            assert message["index"] >= 0
+            assert message["prediction"] == 1
+            assert message["actual"] in (0, 1)
+            assert message["probability"] == pytest.approx(0.85)
+            assert message["risk_level"] == "High"
+            assert message["latency_ms"] >= 0
+            assert message["features"]["Amount"] > 0
+            assert "V17" in message["features"]
+            socket.send_json({"action": "stop"})
 
 
 # =============================================================================
