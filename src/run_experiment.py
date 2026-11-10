@@ -83,6 +83,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
+    TimeSeriesSplit,
     learning_curve,
     train_test_split,
 )
@@ -372,7 +373,7 @@ def _search_pipeline(
     param_grid: Dict[str, Any],
     X: np.ndarray,
     y: np.ndarray,
-    cv: StratifiedKFold,
+    cv: Any,
     n_iter: int,
     cfg: Dict[str, Any],
     checkpoint_path: Path,
@@ -439,7 +440,7 @@ def _search_pipeline(
 def _tune_logistic_regression(
     X: np.ndarray,
     y: np.ndarray,
-    cv: StratifiedKFold,
+    cv: Any,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
 ) -> ImbPipeline:
@@ -455,7 +456,7 @@ def _tune_logistic_regression(
 def _tune_random_forest(
     X: np.ndarray,
     y: np.ndarray,
-    cv: StratifiedKFold,
+    cv: Any,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
 ) -> ImbPipeline:
@@ -473,7 +474,7 @@ def _tune_random_forest(
 def _tune_xgboost(
     X: np.ndarray,
     y: np.ndarray,
-    cv: StratifiedKFold,
+    cv: Any,
     cfg: Dict[str, Any],
     checkpoint_dir: Path,
 ) -> ImbPipeline:
@@ -543,7 +544,7 @@ def generate_oof_meta_features(
     X: np.ndarray,
     y: np.ndarray,
     base_learners: List[Any],
-    cv: StratifiedKFold,
+    cv: Any,
     smote_ratio: float,
     n_jobs: int,
     random_state: int,
@@ -584,6 +585,57 @@ def generate_oof_meta_features(
 # ===========================================================================
 # FULL PIPELINE
 # ===========================================================================
+
+def _build_cross_validator(
+    y: np.ndarray,
+    cfg: Dict[str, Any],
+    split_strategy: str,
+    seed: int,
+) -> Any:
+    """
+    Use forward-chaining folds for temporal experiments.
+
+    Every validation block is strictly later than its training window.
+    Folds are checked for both classes and enough positive training examples
+    for SMOTE. Random stratified folds are reserved for the optional random
+    comparison protocol and supplementary analyses.
+    """
+    if split_strategy == "temporal":
+        cv = TimeSeriesSplit(n_splits=cfg["n_folds"])
+        splits = list(cv.split(np.arange(len(y))))
+        for fold_number, (train_idx, valid_idx) in enumerate(splits, start=1):
+            if train_idx.max() >= valid_idx.min():
+                raise RuntimeError("Forward-chaining CV produced a non-chronological fold.")
+            train_labels = y[train_idx]
+            valid_labels = y[valid_idx]
+            positives = int(np.sum(train_labels == 1))
+            if np.unique(train_labels).size != 2 or positives <= 5:
+                raise ValueError(
+                    f"Temporal CV fold {fold_number} has only {positives} fraud examples "
+                    "in its training window; both classes and at least six positives are "
+                    "required for the current SMOTE configuration. Reduce n_folds or inspect "
+                    "the dataset's temporal fraud distribution."
+                )
+            if np.unique(valid_labels).size != 2:
+                raise ValueError(
+                    f"Temporal CV fold {fold_number} does not contain both classes. "
+                    "The benchmark's fraud distribution does not support this fold layout."
+                )
+        return cv
+    if split_strategy == "stratified_random":
+        return StratifiedKFold(
+            n_splits=cfg["n_folds"], shuffle=True, random_state=seed,
+        )
+    raise ValueError("split_strategy must be 'temporal' or 'stratified_random'.")
+
+
+def _oof_validation_indices(cv: Any, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Return the rows that received genuine held-out OOF predictions."""
+    folds = [valid_idx for _, valid_idx in cv.split(X, y)]
+    if not folds:
+        raise ValueError("Cross-validator produced no OOF validation folds.")
+    return np.concatenate(folds).astype(int)
+
 
 def _split_train_validation_test(
     X: np.ndarray,
@@ -688,33 +740,51 @@ def run_full_pipeline(
         f"test={X_test.shape}"
     )
 
-    # Isolate hyperparameter selection from the rows used to train the
-    # stacking meta-learner. Otherwise, selected hyperparameters would have
-    # indirectly seen the labels of every OOF validation row.
-    X_tune, X_stack, y_tune, y_stack = train_test_split(
-        X_train, y_train, test_size=0.25, stratify=y_train,
-        random_state=cfg["random_state"],
+    # Keep hyperparameter selection disjoint from OOF meta-training labels.
+    # In temporal mode, the tuning subset is the earliest training prefix and
+    # the stack subset is the later suffix. Random splitting is used only by
+    # the explicitly optional stratified_random protocol.
+    if strategy == "temporal":
+        tune_end = int(len(y_train) * 0.30)
+        X_tune, X_stack = X_train[:tune_end], X_train[tune_end:]
+        y_tune, y_stack = y_train[:tune_end], y_train[tune_end:]
+    else:
+        X_tune, X_stack, y_tune, y_stack = train_test_split(
+            X_train, y_train, test_size=0.70, stratify=y_train,
+            random_state=cfg["random_state"],
+        )
+
+    cv_tune = _build_cross_validator(
+        y_tune, cfg, strategy, cfg["random_state"],
     )
-    cv = StratifiedKFold(
-        n_splits=cfg["n_folds"], shuffle=True, random_state=cfg["random_state"],
+    cv_stack = _build_cross_validator(
+        y_stack, cfg, strategy, cfg["random_state"],
     )
     learners = [
-        _tune_logistic_regression(X_tune, y_tune, cv, cfg, checkpoint_dir),
-        _tune_random_forest(X_tune, y_tune, cv, cfg, checkpoint_dir),
-        _tune_xgboost(X_tune, y_tune, cv, cfg, checkpoint_dir),
+        _tune_logistic_regression(X_tune, y_tune, cv_tune, cfg, checkpoint_dir),
+        _tune_random_forest(X_tune, y_tune, cv_tune, cfg, checkpoint_dir),
+        _tune_xgboost(X_tune, y_tune, cv_tune, cfg, checkpoint_dir),
     ]
 
-    _log_step("Generating OOF meta-features on a hyperparameter-disjoint stack partition …")
+    _log_step(
+        "Generating forward-only OOF meta-features on the later stack partition …"
+        if strategy == "temporal"
+        else "Generating OOF meta-features on a hyperparameter-disjoint stack partition …"
+    )
     meta_X_train = generate_oof_meta_features(
-        X_stack, y_stack, learners, cv,
+        X_stack, y_stack, learners, cv_stack,
         cfg["smote_sampling_strategy"], cfg["n_jobs"], cfg["random_state"],
         reference_X=X_tune, reference_y=y_tune,
     )
+    meta_oof_indices = _oof_validation_indices(cv_stack, X_stack, y_stack)
+    if np.unique(y_stack[meta_oof_indices]).size != 2:
+        raise ValueError("OOF meta-training rows must contain both legitimate and fraud classes.")
+
     meta_learner = LogisticRegression(
         C=cfg["meta_lr_C"], solver=cfg["meta_lr_solver"],
         max_iter=cfg["meta_lr_max_iter"], random_state=cfg["random_state"],
     )
-    meta_learner.fit(meta_X_train, y_stack)
+    meta_learner.fit(meta_X_train[meta_oof_indices], y_stack[meta_oof_indices])
 
     # Final base learners are refitted on the complete development-training
     # partition only after the meta-learner has been fitted from OOF predictions.
@@ -774,17 +844,20 @@ def run_full_pipeline(
             "split_strategy": strategy,
             "training_rows": int(len(y_train)),
             "base_hyperparameter_tuning_rows": int(len(y_tune)),
-            "meta_oof_rows": int(len(y_stack)),
+            "meta_stack_pool_rows": int(len(y_stack)),
+            "meta_oof_rows": int(len(meta_oof_indices)),
             "validation_rows": int(len(y_valid)),
             "test_rows": int(len(y_test)),
             "threshold_selected_on": "validation partition",
             "test_set_used_for_threshold_selection": False,
             "hyperparameter_tuning_rows_disjoint_from_oof_meta_rows": True,
+            "cross_validation_strategy": "expanding_window_time_series" if strategy == "temporal" else "stratified_kfold",
         },
         "evaluation_protocol": {
             "threshold_selected_on": "held-out validation partition",
             "test_set_used_for_threshold_selection": False,
             "temporal_validation": strategy == "temporal",
+            "inner_cross_validation": "expanding_window_time_series" if strategy == "temporal" else "stratified_kfold",
             "resampling": "SMOTE inside every training fold via imbalanced-learn Pipeline",
             "scaling": "StandardScaler inside every training fold via imbalanced-learn Pipeline",
         },
@@ -820,6 +893,7 @@ def run_full_pipeline(
             "validation_fraction": 0.15,
             "test_fraction": 0.15,
             "test_partition_used_for": "one-time final evaluation only",
+            "temporal_training_protocol": "chronological tune prefix, forward-chaining CV and later OOF stack rows" if strategy == "temporal" else "stratified-random development protocol",
         },
         "evaluation_limitations": {
             "external_dataset_validation": "not performed",
