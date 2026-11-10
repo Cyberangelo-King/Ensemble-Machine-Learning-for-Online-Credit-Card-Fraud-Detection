@@ -865,16 +865,27 @@ elif page == "🤖 Model Comparison":
 
     metrics_data = load_metrics()
     base_metrics = metrics_data.get("base_model_test_metrics", {}) if metrics_data else {}
+    dummy_metrics = metrics_data.get("dummy_baseline_test_metrics", {}) if metrics_data else {}
     ensemble_metrics = metrics_data.get("threshold_0.5", {}) if metrics_data else {}
 
     if base_metrics and ensemble_metrics:
         rows = []
+        if dummy_metrics:
+            rows.append({
+                "Model": "Dummy prior baseline",
+                "AUPRC (AP)": dummy_metrics.get("AUPRC"),
+                "ROC-AUC": dummy_metrics.get("ROC_AUC"),
+                "F1 @ 0.50": dummy_metrics.get("F1"),
+                "MCC @ 0.50": dummy_metrics.get("MCC"),
+                "Precision @ 0.50": dummy_metrics.get("Precision"),
+                "Recall @ 0.50": dummy_metrics.get("Recall"),
+            })
         for model_name in ["Logistic Regression", "Random Forest", "XGBoost"]:
             if model_name in base_metrics:
                 item = base_metrics[model_name]
                 rows.append({
                     "Model": model_name,
-                    "AUPRC": item.get("AUPRC"),
+                    "AUPRC (AP)": item.get("AUPRC"),
                     "ROC-AUC": item.get("ROC_AUC"),
                     "F1 @ 0.50": item.get("F1"),
                     "MCC @ 0.50": item.get("MCC"),
@@ -883,7 +894,7 @@ elif page == "🤖 Model Comparison":
                 })
         rows.append({
             "Model": "Stacking Ensemble",
-            "AUPRC": ensemble_metrics.get("AUPRC"),
+            "AUPRC (AP)": ensemble_metrics.get("AUPRC"),
             "ROC-AUC": ensemble_metrics.get("ROC_AUC"),
             "F1 @ 0.50": ensemble_metrics.get("F1"),
             "MCC @ 0.50": ensemble_metrics.get("MCC"),
@@ -892,11 +903,11 @@ elif page == "🤖 Model Comparison":
         })
         comparison = pd.DataFrame(rows)
         st.dataframe(comparison, use_container_width=True, hide_index=True)
-        chart_columns = ["AUPRC", "F1 @ 0.50", "MCC @ 0.50", "ROC-AUC"]
+        chart_columns = ["AUPRC (AP)", "F1 @ 0.50", "MCC @ 0.50", "ROC-AUC"]
         st.bar_chart(comparison.set_index("Model")[chart_columns])
     else:
         st.info(
-            "Per-learner test metrics are not available in this report yet. Run the full research "
+            "Baseline and per-learner test metrics are not available in this report yet. Run the full research "
             "experiment to generate an apples-to-apples comparison on the same untouched test partition."
         )
 
